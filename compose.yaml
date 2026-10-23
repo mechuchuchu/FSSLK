@@ -1,0 +1,12 @@
+services:
+  coordinator:
+    build: .
+    command: ["coordinator", "--host", "0.0.0.0", "--port", "27494"]
+    ports:
+      - "27494:27494"
+
+  worker:
+    build: .
+    command: ["worker", "--host", "coordinator", "--port", "27494"]
+    depends_on:
+      - coordinator
