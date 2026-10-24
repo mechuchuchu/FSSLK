@@ -56,6 +56,14 @@ def main() -> None:
     sum_parser.add_argument("--host", default="127.0.0.1")
     sum_parser.add_argument("--port", type=int, default=27494)
 
+    from .pipeline import add_arguments as add_pipeline_arguments
+
+    pipeline_parser = commands.add_parser(
+        "run-pipeline",
+        help="run a captured demo model as a two-stage pipeline on two workers",
+    )
+    add_pipeline_arguments(pipeline_parser)
+
     args = parser.parse_args()
     try:
         if args.command == "coordinator":
@@ -85,6 +93,10 @@ def main() -> None:
             print(f"Distributed result: {response['result']}")
             print(f"Expected result: {expected}")
             print(f"Workers: {', '.join(response['workers'])}")
+        elif args.command == "run-pipeline":
+            from .pipeline import main as run_pipeline_main
+
+            run_pipeline_main(args)
         else:
             parser.error("unknown command")
     except (ConnectionError, OSError, RuntimeError, ValueError) as exc:

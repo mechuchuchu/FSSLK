@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import socket
 import statistics
 import threading
@@ -12,7 +14,10 @@ from typing import Any
 
 import torch
 
+from .bundle import decode_bundle, encode_bundle
+from .linkemu import LinkEmulation
 from .protocol import receive_frame, receive_message, send_frame
+from .stage import StageRuntime, StageSpec
 from .tensor import decode_tensor
 from .udp_probe import UDP_PROBE_PACKET, decode_probe_packet, encode_probe_packet
 
@@ -22,6 +27,8 @@ CPU_BENCHMARK_REPEATS = 5
 UDP_PROBE_PACKET_COUNT = 100
 UDP_PROBE_INTERVAL_SECONDS = 30
 UDP_PROBE_RESPONSE_TIMEOUT_SECONDS = 2
+MAX_STAGES_PER_WORKER = 4
+_STAGE_ID = re.compile(r"[A-Za-z0-9_.-]{1,64}")
 
 
 def _compute(message: dict[str, Any], payload: bytes) -> dict[str, Any]:
@@ -31,6 +38,59 @@ def _compute(message: dict[str, Any], payload: bytes) -> dict[str, Any]:
     if tensor.numel() == 0:
         raise ValueError("Task tensor must contain at least one element")
     return {"result": tensor.sum().item()}
+
+
+def _handle_stage(
+    message: dict[str, Any],
+    payload: bytes,
+    stages: dict[str, StageRuntime],
+) -> tuple[dict[str, Any], bytes]:
+    """Run one stage operation. Everything in ``message`` is untrusted input."""
+    try:
+        operation = message.get("op")
+        stage_id = message.get("stage_id")
+        if not isinstance(stage_id, str) or not _STAGE_ID.fullmatch(stage_id):
+            raise ValueError("invalid stage id")
+
+        if operation == "define":
+            spec = StageSpec.from_dict(json.loads(payload.decode("utf-8")))
+            if spec.stage_id != stage_id:
+                raise ValueError("stage id does not match the stage definition")
+            if stage_id not in stages and len(stages) >= MAX_STAGES_PER_WORKER:
+                raise ValueError(f"a worker holds at most {MAX_STAGES_PER_WORKER} stages")
+            stages[stage_id] = StageRuntime(spec)
+            return {"ok": True, "params_expected": len(spec.params)}, b""
+
+        runtime = stages.get(stage_id)
+        if runtime is None:
+            raise ValueError(f"unknown stage: {stage_id!r}")
+        if operation == "put":
+            runtime.put_params(decode_bundle(message.get("tensors"), payload))
+            return {"ok": True, "params_missing": len(runtime.missing_params)}, b""
+        if operation == "run":
+            inputs = decode_bundle(message.get("tensors"), payload)
+            started_at = time.perf_counter()
+            outputs = runtime.run(inputs)
+            compute_seconds = time.perf_counter() - started_at
+            tensors, output_payload = encode_bundle(outputs)
+            return (
+                {"ok": True, "tensors": tensors, "compute_seconds": round(compute_seconds, 6)},
+                output_payload,
+            )
+        if operation == "drop":
+            del stages[stage_id]
+            return {"ok": True}, b""
+        raise ValueError(f"unknown stage operation: {operation!r}")
+    except Exception as exc:  # Report the failure to the coordinator, keep the worker alive.
+        return {"ok": False, "error": str(exc)}, b""
+
+
+def _configure_threads() -> None:
+    """Optionally pin torch's thread count (FSSLK_TORCH_THREADS), e.g. when several
+    workers share one machine and should not compete for the same cores."""
+    value = os.environ.get("FSSLK_TORCH_THREADS")
+    if value:
+        torch.set_num_threads(max(1, int(value)))
 
 
 def _benchmark_cpu_speed() -> float:
@@ -50,6 +110,7 @@ def _benchmark_cpu_speed() -> float:
 def run_worker(host: str, port: int, node_id: str | None = None, heartbeat_interval: float = 2.0) -> None:
     identity = node_id or os.environ.get("FSSLK_NODE_ID") or socket.gethostname() or uuid.uuid4().hex[:8]
     compute_speed = _benchmark_cpu_speed()
+    _configure_threads()
     delay = 1.0
     while True:
         try:
@@ -72,9 +133,18 @@ def _run_connection(
     conn.settimeout(None)
     send_lock = threading.Lock()
     stop_heartbeat = threading.Event()
+    link = LinkEmulation.from_env()
+    stages: dict[str, StageRuntime] = {}
+    if link.enabled:
+        print(
+            f"[FSSLK] {node_id}: emulating a link with {link.delay_ms:g} ms one-way delay"
+            + (f" and {link.rate_mbps:g} Mbps" if link.rate_mbps else ""),
+            flush=True,
+        )
 
     def send(message: dict[str, Any], payload: bytes = b"") -> None:
-        with send_lock:
+        with send_lock:  # one frame at a time, like a real link
+            link.wait(len(payload))
             send_frame(conn, message, payload)
 
     stream = conn.makefile("rb")
@@ -119,7 +189,15 @@ def _run_connection(
             if frame is None:
                 raise ConnectionError("Coordinator closed the connection")
             message, payload = frame
+            link.wait(len(payload))
             message_type = message.get("type")
+            if message_type == "stage":
+                reply, reply_payload = _handle_stage(message, payload, stages)
+                send(
+                    {"type": "stage_result", "task_id": str(message.get("task_id", "")), **reply},
+                    reply_payload,
+                )
+                continue
             if message_type == "probe":
                 if payload:
                     raise ValueError("RTT probe must not contain a binary payload")

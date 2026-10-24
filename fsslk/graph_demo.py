@@ -39,6 +39,11 @@ class Block(nn.Module):
         return x + self.fc2(F.gelu(self.fc1(self.ln2(x))))
 
 
+def build_model(layers: int, dim: int, heads: int) -> nn.Module:
+    """The demo model: a stack of transformer blocks, in eval mode."""
+    return nn.Sequential(*[Block(dim, heads) for _ in range(layers)]).eval()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(prog="fsslk.graph_demo", description=__doc__)
     parser.add_argument("--layers", type=int, default=4)
@@ -50,7 +55,7 @@ def main() -> None:
     args = parser.parse_args()
 
     torch.manual_seed(0)
-    model = nn.Sequential(*[Block(args.dim, args.heads) for _ in range(args.layers)]).eval()
+    model = build_model(args.layers, args.dim, args.heads)
     example = torch.randn(args.batch, args.seq, args.dim)
 
     wrapped = fsslk.wrap(model, example)  # captures immediately, runs nothing remotely

@@ -27,6 +27,11 @@ NETWORK_PROBE_INTERVAL_SECONDS = 5
 BANDWIDTH_PROBE_INTERVAL_SECONDS = 30
 NETWORK_PROBE_TIMEOUT_SECONDS = 20
 BANDWIDTH_PROBE_BYTES = 256 * 1024
+STAGE_TIMEOUT_SECONDS = 600
+# Stage commands are relayed to the worker named in the request. Only these
+# request fields are forwarded; the worker validates them again.
+STAGE_COMMANDS = frozenset({"stage_define", "stage_put", "stage_run", "stage_drop"})
+STAGE_FORWARDED_FIELDS = ("stage_id", "tensors")
 
 
 @dataclass
@@ -208,6 +213,14 @@ class Coordinator:
                     pending = self.pending.get(task_id)
                     if pending is not None and pending.node is node and not pending.future.done():
                         pending.future.set_result(message)
+            elif kind == "stage_result":
+                # Unlike "result", stage results carry tensors back as a binary payload.
+                node.last_seen = time.monotonic()
+                task_id = str(message.get("task_id", ""))
+                with self.pending_lock:
+                    pending = self.pending.get(task_id)
+                    if pending is not None and pending.node is node and not pending.future.done():
+                        pending.future.set_result((message, payload))
             elif kind in {"probe_result", "bandwidth_result"}:
                 if payload:
                     raise ValueError("network probe results must not contain a binary payload")
@@ -454,7 +467,62 @@ class Coordinator:
                 send_message(conn, {"type": "response", "ok": False, "error": str(exc)})
             return
 
+        if command in STAGE_COMMANDS:
+            self._relay_stage(conn, str(command), request, payload)
+            return
+
         send_message(conn, {"type": "response", "ok": False, "error": "Unknown command"})
+
+    def _relay_stage(
+        self,
+        conn: socket.socket,
+        command: str,
+        request: dict[str, Any],
+        payload: bytes,
+    ) -> None:
+        """Forward one stage command to the named worker and relay its reply."""
+        worker_id = request.get("worker")
+        with self.nodes_lock:
+            node = self.nodes.get(worker_id) if isinstance(worker_id, str) else None
+        if node is None or not node.connected:
+            send_message(
+                conn,
+                {"type": "response", "ok": False, "error": f"Unknown or disconnected worker: {worker_id!r}"},
+            )
+            return
+
+        task_id = uuid.uuid4().hex
+        pending = PendingTask(task_id=task_id, node=node, future=Future())
+        with self.pending_lock:
+            self.pending[task_id] = pending
+        try:
+            forwarded: dict[str, Any] = {
+                "type": "stage",
+                "task_id": task_id,
+                "op": command.removeprefix("stage_"),
+            }
+            forwarded.update(
+                {key: request[key] for key in STAGE_FORWARDED_FIELDS if key in request}
+            )
+            node.send(forwarded, payload)
+            reply, reply_payload = pending.future.result(timeout=STAGE_TIMEOUT_SECONDS)
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            send_message(
+                conn,
+                {
+                    "type": "response",
+                    "ok": False,
+                    "error": f"Worker {node.node_id}: {exc or type(exc).__name__}",
+                },
+            )
+            return
+        finally:
+            with self.pending_lock:
+                self.pending.pop(task_id, None)
+
+        response = {key: value for key, value in reply.items() if key not in {"type", "task_id"}}
+        response.setdefault("ok", False)
+        send_frame(conn, {"type": "response", **response}, reply_payload)
 
     def _distributed_sum(self, values: torch.Tensor) -> tuple[int | float, list[str]]:
         if values.numel() == 0:
@@ -580,7 +648,7 @@ class Coordinator:
 class PendingTask:
     task_id: str
     node: WorkerNode
-    future: Future[dict[str, Any]]
+    future: Future[Any]  # a result message, or (message, payload) for stage tasks
 
 
 @dataclass
