@@ -13,14 +13,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import queue
 import socket
 import statistics
+import tempfile
 import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable
 
 import torch
@@ -84,6 +87,7 @@ def wait_for_workers(
         nodes = {node["node_id"]: node for node in response.get("nodes", [])}
         ready = all(
             name in nodes
+            and nodes[name].get("state", "healthy") == "healthy"
             and nodes[name].get("rtt_ms") is not None
             and nodes[name].get("bandwidth_mbps") is not None
             for name in workers
@@ -119,14 +123,26 @@ def deploy_stage(
 def run_stage(
     host: str, port: int, worker: str, stage_id: str, inputs: dict[str, torch.Tensor]
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
+    output_meta, output_payload, record = run_stage_payload(
+        host, port, worker, stage_id, inputs
+    )
+    return decode_bundle(output_meta, output_payload), record
+
+
+def run_stage_payload(
+    host: str, port: int, worker: str, stage_id: str, inputs: dict[str, torch.Tensor]
+) -> tuple[list[dict[str, Any]], bytes, dict[str, Any]]:
+    """Run a stage and return its encoded output without materializing tensors."""
     meta, payload = encode_bundle(inputs)
     started_at = time.perf_counter()
     response, reply_payload = call_worker(
         host, port, worker, "stage_run", {"stage_id": stage_id, "tensors": meta}, payload
     )
     wall = time.perf_counter() - started_at
-    outputs = decode_bundle(response.get("tensors"), reply_payload)
-    return outputs, {
+    output_meta = response.get("tensors")
+    if not isinstance(output_meta, list):
+        raise PipelineError(f"{worker}: stage returned invalid tensor metadata")
+    return output_meta, reply_payload, {
         "wall": wall,
         "compute": float(response.get("compute_seconds", 0.0)),
         "sent_bytes": len(payload),
@@ -162,6 +178,53 @@ class PipelineResult:
         return data
 
 
+@dataclass(frozen=True)
+class _SpilledActivation:
+    path: Path
+    metadata: list[dict[str, Any]]
+
+
+class _ActivationSpool:
+    """Store queued stage activations in temporary files on the coordinator."""
+
+    def __init__(self) -> None:
+        directory = os.environ.get("FSSLK_ACTIVATION_SPOOL_DIR") or None
+        if directory:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+        self._temporary_directory = tempfile.TemporaryDirectory(
+            prefix="fsslk-activations-", dir=directory
+        )
+        self._root = Path(self._temporary_directory.name)
+        self._next_id = 0
+
+    def write(self, metadata: list[dict[str, Any]], payload: bytes) -> _SpilledActivation:
+        path = self._root / f"activation-{self._next_id:08d}.bin"
+        self._next_id += 1
+        with path.open("wb") as handle:
+            handle.write(payload)
+        return _SpilledActivation(path, metadata)
+
+    def read(self, activation: _SpilledActivation) -> dict[str, torch.Tensor]:
+        try:
+            payload = activation.path.read_bytes()
+        finally:
+            self.discard(activation)
+        return decode_bundle(activation.metadata, payload)
+
+    @staticmethod
+    def discard(activation: _SpilledActivation) -> None:
+        activation.path.unlink(missing_ok=True)
+
+    def close(self) -> None:
+        self._temporary_directory.cleanup()
+
+    def __enter__(self) -> "_ActivationSpool":
+        return self
+
+    def __exit__(self, *_exc_info: object) -> None:
+        self.close()
+
+
 def _run_once(
     host: str,
     port: int,
@@ -173,51 +236,76 @@ def _run_once(
 ) -> tuple[list[torch.Tensor], list[dict[str, Any]], float]:
     """Stream every micro-batch through both stages; stage A and B overlap."""
     spec_a, spec_b = specs
-    handoff: queue.Queue = queue.Queue()
+    # Keep at most one activation reference waiting for B. A blocks here when
+    # B is slower, while the tensor bytes themselves live in the coordinator's
+    # temporary spool instead of an unbounded in-memory queue.
+    handoff: queue.Queue = queue.Queue(maxsize=1)
     results: dict[int, dict[str, torch.Tensor]] = {}
     calls: list[dict[str, Any]] = []
     errors: list[BaseException] = []
+    stop = threading.Event()
 
-    def stage_a() -> None:
-        try:
-            for index, chunk in enumerate(chunks):
-                feed = {item.name: chunk for item in spec_a.inputs}
-                middle, record = run_stage(host, port, workers[0], spec_a.stage_id, feed)
-                calls.append({"stage": "A", "microbatch": index, **record})
-                handoff.put((index, middle))
-        except BaseException as exc:  # reported to the caller after the threads end
-            errors.append(exc)
-        finally:
-            handoff.put(None)
+    def enqueue(item: tuple[int, _SpilledActivation] | None) -> bool:
+        while not stop.is_set():
+            try:
+                handoff.put(item, timeout=0.1)
+                return True
+            except queue.Full:
+                continue
+        return False
 
-    def stage_b() -> None:
-        try:
-            while (item := handoff.get()) is not None:
-                index, middle = item
-                feed = {
-                    spec.name: middle[spec.name] if spec.name in middle else chunks[index]
-                    for spec in spec_b.inputs
-                }
-                outputs, record = run_stage(host, port, workers[1], spec_b.stage_id, feed)
-                calls.append({"stage": "B", "microbatch": index, **record})
-                results[index] = outputs
-        except BaseException as exc:
-            errors.append(exc)
+    with _ActivationSpool() as spool:
+        def stage_a() -> None:
+            try:
+                for index, chunk in enumerate(chunks):
+                    if stop.is_set():
+                        break
+                    feed = {item.name: chunk for item in spec_a.inputs}
+                    metadata, payload, record = run_stage_payload(
+                        host, port, workers[0], spec_a.stage_id, feed
+                    )
+                    calls.append({"stage": "A", "microbatch": index, **record})
+                    activation = spool.write(metadata, payload)
+                    del metadata, payload
+                    if not enqueue((index, activation)):
+                        spool.discard(activation)
+                        break
+            except BaseException as exc:  # reported to the caller after the threads end
+                errors.append(exc)
+            finally:
+                enqueue(None)
 
-    started_at = time.perf_counter()
-    threads = [threading.Thread(target=stage_a), threading.Thread(target=stage_b)]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    elapsed = time.perf_counter() - started_at
-    if errors:
-        raise PipelineError(str(errors[0])) from errors[0]
-    outputs = [
-        torch.cat([results[index][name] for index in range(len(chunks))], dim=0)
-        for name in output_names
-    ]
-    return outputs, calls, elapsed
+        def stage_b() -> None:
+            try:
+                while (item := handoff.get()) is not None:
+                    index, activation = item
+                    middle = spool.read(activation)
+                    feed = {
+                        spec.name: middle[spec.name] if spec.name in middle else chunks[index]
+                        for spec in spec_b.inputs
+                    }
+                    outputs, record = run_stage(host, port, workers[1], spec_b.stage_id, feed)
+                    calls.append({"stage": "B", "microbatch": index, **record})
+                    results[index] = outputs
+                    del feed, middle
+            except BaseException as exc:
+                errors.append(exc)
+                stop.set()
+
+        started_at = time.perf_counter()
+        threads = [threading.Thread(target=stage_a), threading.Thread(target=stage_b)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        elapsed = time.perf_counter() - started_at
+        if errors:
+            raise PipelineError(str(errors[0])) from errors[0]
+        outputs = [
+            torch.cat([results[index][name] for index in range(len(chunks))], dim=0)
+            for name in output_names
+        ]
+        return outputs, calls, elapsed
 
 
 def _time_local(model: nn.Module, example: torch.Tensor, threads: int) -> float:
@@ -251,6 +339,8 @@ def run_pipeline(
 ) -> PipelineResult:
     if model.training:
         raise PipelineError("put the model in eval mode (model.eval()) before running a pipeline")
+    if repeats < 1:
+        raise PipelineError("repeats must be at least 1")
     if microbatches < 1 or example_input.shape[0] % microbatches:
         raise PipelineError(f"batch of {example_input.shape[0]} does not split into {microbatches} micro-batches")
     chunks = [chunk.contiguous() for chunk in example_input.chunk(microbatches)]

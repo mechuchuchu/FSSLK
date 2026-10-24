@@ -8,7 +8,9 @@ as untrusted, because workers build specs from what the network sends them.
 
 ``StageRuntime`` executes a spec: weights are loaded once with ``put_params``
 and then ``run`` takes activations in and gives activations out, so only
-activations cross the network on each step.
+activations cross the network on each step. ``run_with_grad`` is the local
+autograd foundation: it retains one forward graph and its execution context
+can compute a vector-Jacobian product for the stage inputs and weights.
 """
 
 from __future__ import annotations
@@ -37,6 +39,85 @@ _WIRE_DTYPES = {name: dtype for dtype, name in _DTYPE_NAMES.items()}  # name -> 
 
 class StageError(ValueError):
     """The graph cannot be cut as requested, or a stage spec is invalid."""
+
+
+@dataclass(frozen=True)
+class StageGradients:
+    """Gradients returned by one stage's backward pass."""
+
+    inputs: dict[str, torch.Tensor | None]
+    params: dict[str, torch.Tensor | None]
+
+
+@dataclass
+class StageExecution:
+    """A forward result whose graph is retained for one backward pass."""
+
+    outputs: dict[str, torch.Tensor]
+    _inputs: dict[str, torch.Tensor]
+    _params: dict[str, torch.Tensor]
+    _backward_done: bool = False
+
+    def backward(
+        self, output_gradients: dict[str, torch.Tensor | None]
+    ) -> StageGradients:
+        """Return gradients for this stage's inputs and floating-point params."""
+        if self._backward_done:
+            raise StageError("this stage execution has already been backpropagated")
+        if set(output_gradients) != set(self.outputs):
+            raise StageError(
+                f"expected output gradients {sorted(self.outputs)}, "
+                f"got {sorted(output_gradients)}"
+            )
+
+        outputs: list[torch.Tensor] = []
+        grad_outputs: list[torch.Tensor] = []
+        for name, output in self.outputs.items():
+            grad = output_gradients[name]
+            if grad is None:
+                continue
+            if not output.requires_grad:
+                raise StageError(f"stage output {name} is not differentiable")
+            if (
+                tuple(grad.shape) != tuple(output.shape)
+                or grad.dtype != output.dtype
+                or grad.device != output.device
+            ):
+                raise StageError(
+                    f"gradient for {name} is {tuple(grad.shape)} {grad.dtype} "
+                    f"on {grad.device}, expected {tuple(output.shape)} {output.dtype} "
+                    f"on {output.device}"
+                )
+            outputs.append(output)
+            grad_outputs.append(grad)
+        if not outputs:
+            raise StageError("at least one differentiable output gradient is required")
+
+        input_names = [name for name, tensor in self._inputs.items() if tensor.requires_grad]
+        param_names = [name for name, tensor in self._params.items() if tensor.requires_grad]
+        names = [("input", name) for name in input_names] + [
+            ("param", name) for name in param_names
+        ]
+        targets = [self._inputs[name] for name in input_names] + [
+            self._params[name] for name in param_names
+        ]
+        if not targets:
+            raise StageError("stage has no floating-point inputs or params to differentiate")
+
+        gradients = torch.autograd.grad(
+            outputs,
+            targets,
+            grad_outputs=grad_outputs,
+            allow_unused=True,
+        )
+        input_gradients = {name: None for name in self._inputs}
+        param_gradients = {name: None for name in self._params}
+        for (kind, name), gradient in zip(names, gradients):
+            destination = input_gradients if kind == "input" else param_gradients
+            destination[name] = gradient
+
+        self._backward_done = True
+        return StageGradients(input_gradients, param_gradients)
 
 
 @dataclass(frozen=True)
@@ -268,6 +349,32 @@ class StageRuntime:
             self.params[name] = tensor
 
     def run(self, inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        self._validate_inputs(inputs)
+        with torch.no_grad():
+            return self._execute(inputs, self.params)
+
+    def run_with_grad(self, inputs: dict[str, torch.Tensor]) -> StageExecution:
+        """Run with autograd enabled and retain a context for one backward pass.
+
+        Floating-point inputs and all floating-point stage params are treated as
+        differentiation targets. Integer tensors remain ordinary nondifferentiable
+        values. Gradients are returned to the caller and are not accumulated on the
+        runtime's stored weights.
+        """
+        self._validate_inputs(inputs)
+        input_leaves = {
+            name: tensor.detach().requires_grad_(tensor.is_floating_point())
+            for name, tensor in inputs.items()
+        }
+        param_leaves = {
+            name: tensor.detach().requires_grad_(tensor.is_floating_point())
+            for name, tensor in self.params.items()
+        }
+        with torch.enable_grad():
+            outputs = self._execute(input_leaves, param_leaves)
+        return StageExecution(outputs, input_leaves, param_leaves)
+
+    def _validate_inputs(self, inputs: dict[str, torch.Tensor]) -> None:
         if self.missing_params:
             raise StageError(f"weights not loaded yet: {len(self.missing_params)} missing")
         if set(inputs) != set(self._input_specs):
@@ -277,10 +384,14 @@ class StageRuntime:
         for name, tensor in inputs.items():
             self._check(self._input_specs[name], name, tensor, "input")
 
-        env: dict[str, Any] = {**self.params, **inputs}
-        with torch.no_grad():
-            for node in self.spec.nodes:
-                env[node.name] = execute_op(node.op, node.call, env)
+    def _execute(
+        self,
+        inputs: dict[str, torch.Tensor],
+        params: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        env: dict[str, Any] = {**params, **inputs}
+        for node in self.spec.nodes:
+            env[node.name] = execute_op(node.op, node.call, env)
         results = {name: env[name] for name in self.spec.outputs}
         for name, value in results.items():
             if not isinstance(value, torch.Tensor):

@@ -1,6 +1,6 @@
 # FSSLK
 
-FSSLK is a prototype for coordinating CPU work across machines. This first version connects a coordinator to CPU workers over TCP, tracks worker heartbeats, and distributes a small PyTorch tensor sum.
+FSSLK is a prototype for coordinating CPU work across machines. This first version connects a coordinator to CPU workers over TCP, tracks worker heartbeats on a separate control connection, and distributes a small PyTorch tensor sum.
 
 ## Run with Docker Compose
 
@@ -16,6 +16,12 @@ Show the workers registered with the coordinator:
 docker compose exec coordinator python -m fsslk status --host coordinator
 ```
 
+Worker status reports `healthy`, `suspect`, or `unreachable` from its
+acknowledged control-channel heartbeat. With the default 2-second heartbeat
+interval and 15-second lease, a worker becomes suspect after 7.5 seconds without
+a heartbeat and unreachable after 15 seconds. Stage data continues over the
+separate data connection.
+
 Split a CPU tensor across the workers and add the partial sums:
 
 ```bash
@@ -27,6 +33,73 @@ Stop the cluster:
 ```bash
 docker compose down
 ```
+
+## Run a two-worker model pipeline
+
+The `run-pipeline` prototype captures the demo Transformer, splits its graph
+into two stages, deploys one stage to each of two workers, and streams input
+micro-batches through them. Worker IDs default to container hostnames, so read
+the IDs and check that both workers are active before starting:
+
+```bash
+docker compose up -d --build
+FAST=$(docker compose exec -T worker-fast hostname)
+MED=$(docker compose exec -T worker-medium hostname)
+docker compose exec -T coordinator python -m fsslk status
+```
+
+Run the default model with one micro-batch or four. The coordinator writes each
+measurement file inside its container:
+
+```bash
+docker compose exec -T coordinator python -m fsslk run-pipeline \
+  --workers "$FAST,$MED" --repeats 3 --json /tmp/run_m1.json
+docker compose exec -T coordinator python -m fsslk run-pipeline \
+  --workers "$FAST,$MED" --microbatches 4 --repeats 3 --json /tmp/run_m4.json
+```
+
+Copy the JSON results to the host if needed:
+
+```bash
+docker compose cp coordinator:/tmp/run_m1.json /tmp/run_m1.json
+docker compose cp coordinator:/tmp/run_m4.json /tmp/run_m4.json
+```
+
+`--microbatches` splits the input on its batch axis. Stage A and stage B process
+different chunks at the same time; it does not split a single matrix operation
+across workers. Each matrix and its weights stay whole on the worker assigned
+to that stage. Stage activations pass through the coordinator.
+
+This is a CPU prototype with two stages and two workers. It accepts one tensor
+input and only operations from the worker allowlist; the wire format currently
+supports CPU `int64` and `float32` tensors up to 64 MiB per tensor frame. Models
+must be in evaluation mode. Pipeline stage calls do not have application-level
+retry, and network transfer can cost much more than computation on slow or
+lossy links. The reported link measurements are captured before deployment and
+are not refreshed during each measured run.
+
+When stage B is slower than stage A, the coordinator writes queued A-to-B
+activation payloads to temporary files and keeps at most one activation waiting
+in the handoff queue; stage A pauses while that queue is full. Temporary files
+are removed as stage B reads them and when a run exits. Set
+`FSSLK_ACTIVATION_SPOOL_DIR` to choose a mounted disk-backed directory instead
+of the system temporary directory. The active micro-batch and final model output
+still need memory, and one frame is still limited to 64 MiB; larger activations
+need chunked transfer and tile-aware operations.
+
+## Stage-level automatic differentiation
+
+`StageRuntime.run_with_grad(inputs)` runs one stage with PyTorch autograd enabled
+and returns a `StageExecution`. Call `execution.backward(output_gradients)` to
+get gradients for that execution's floating-point inputs and weights. The
+caller can pass an input gradient from one stage to the previous stage, which
+is the basic vector-Jacobian-product needed for pipeline backpropagation.
+The current stage spec does not distinguish trainable parameters from floating
+buffers, so all floating-point stage params are treated as gradient targets.
+
+This is only a local stage primitive. The distributed pipeline still runs in
+evaluation mode; there is no network backward command, loss calculation,
+optimizer update, gradient aggregation, or MNIST training loop yet.
 
 The worker retries its connection while the coordinator starts. For a local non-Docker run, start `python -m fsslk coordinator`, then start one or more `python -m fsslk worker --host 127.0.0.1` processes in separate terminals. Use `python -m fsslk status` and `python -m fsslk run-sum --size 16` from another terminal.
 

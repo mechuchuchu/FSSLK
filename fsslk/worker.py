@@ -155,6 +155,7 @@ def _run_connection(
             "cpu_count": os.cpu_count() or 1,
             "device": "cpu",
             "compute_elements_per_second": compute_speed,
+            "heartbeat_interval": heartbeat_interval,
         })
         acknowledgement = receive_message(stream)
         if not acknowledgement or acknowledgement.get("type") != "registered":
@@ -162,20 +163,18 @@ def _run_connection(
         try:
             udp_probe_token = bytes.fromhex(str(acknowledgement["udp_probe_token"]))
             udp_port = int(acknowledgement["udp_port"])
+            control_token = str(acknowledgement["control_token"])
         except (KeyError, TypeError, ValueError) as exc:
-            raise ConnectionError("Coordinator did not provide UDP probe settings") from exc
-        if len(udp_probe_token) != 16 or not 1 <= udp_port <= 65535:
+            raise ConnectionError("Coordinator did not provide worker control settings") from exc
+        if len(udp_probe_token) != 16 or len(control_token) != 32 or not 1 <= udp_port <= 65535:
             raise ConnectionError("Coordinator provided invalid UDP probe settings")
         print(f"[FSSLK] Worker ready: {node_id} (CPU, {os.cpu_count() or 1} cores)", flush=True)
 
-        def heartbeat_loop() -> None:
-            while not stop_heartbeat.wait(heartbeat_interval):
-                try:
-                    send({"type": "heartbeat", "node_id": node_id, "time": time.time()})
-                except OSError:
-                    return
-
-        heartbeat = threading.Thread(target=heartbeat_loop, daemon=True)
+        heartbeat = threading.Thread(
+            target=_control_heartbeat_loop,
+            args=(host, port, node_id, control_token, heartbeat_interval, stop_heartbeat),
+            daemon=True,
+        )
         heartbeat.start()
         packet_loss_monitor = threading.Thread(
             target=_udp_packet_loss_loop,
@@ -234,6 +233,73 @@ def _run_connection(
         except OSError:
             pass
         conn.close()
+
+
+def _control_heartbeat_loop(
+    host: str,
+    port: int,
+    node_id: str,
+    control_token: str,
+    heartbeat_interval: float,
+    stop_event: threading.Event,
+) -> None:
+    """Maintain an acknowledged heartbeat over a separate TCP connection."""
+    interval = max(float(heartbeat_interval), 0.1)
+    retry_delay = interval
+    while not stop_event.is_set():
+        conn: socket.socket | None = None
+        stream = None
+        try:
+            conn = socket.create_connection((host, port), timeout=5)
+            conn.settimeout(max(interval * 3, 3.0))
+            stream = conn.makefile("rb")
+            send_frame(
+                conn,
+                {
+                    "role": "worker_control",
+                    "node_id": node_id,
+                    "control_token": control_token,
+                },
+            )
+            acknowledgement = receive_message(stream)
+            if (
+                not acknowledgement
+                or acknowledgement.get("type") != "control_registered"
+                or acknowledgement.get("node_id") != node_id
+            ):
+                raise ConnectionError("Coordinator rejected the control channel")
+
+            sequence = 0
+            retry_delay = interval
+            while not stop_event.wait(interval):
+                sequence += 1
+                send_frame(conn, {"type": "heartbeat", "sequence": sequence})
+                acknowledgement = receive_message(stream)
+                if (
+                    not acknowledgement
+                    or acknowledgement.get("type") != "heartbeat_ack"
+                    or acknowledgement.get("sequence") != sequence
+                ):
+                    raise ConnectionError("Coordinator returned an invalid heartbeat acknowledgement")
+        except (ConnectionError, OSError, ValueError) as exc:
+            if not stop_event.is_set():
+                print(
+                    f"[FSSLK] {node_id}: control heartbeat lost ({exc}); "
+                    f"reconnecting in {retry_delay:.1f}s",
+                    flush=True,
+                )
+        finally:
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass
+            if conn is not None:
+                conn.close()
+
+        if stop_event.wait(retry_delay):
+            return
+        retry_delay = min(retry_delay * 2, 10.0)
 
 
 def _udp_packet_loss_loop(
