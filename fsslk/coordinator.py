@@ -11,11 +11,11 @@ import uuid
 from collections import deque
 from concurrent.futures import Future, TimeoutError
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 import torch
 
-from .protocol import receive_frame, send_frame, send_message
+from .protocol import MAX_PAYLOAD_BYTES, receive_frame, send_frame, send_message
 from .scheduler import NodeCapacity, allocate_chunks
 from .tensor import decode_tensor, encode_tensor
 from .udp_probe import UDP_PROBE_PACKET, decode_probe_packet
@@ -27,6 +27,12 @@ NETWORK_PROBE_INTERVAL_SECONDS = 5
 BANDWIDTH_PROBE_INTERVAL_SECONDS = 30
 NETWORK_PROBE_TIMEOUT_SECONDS = 20
 BANDWIDTH_PROBE_BYTES = 256 * 1024
+STAGE_TIMEOUT_SECONDS = 600
+REMOTE_CALL_TIMEOUT_SECONDS = 600
+# Stage commands are relayed to the worker named in the request. Only these
+# request fields are forwarded; the worker validates them again.
+STAGE_COMMANDS = frozenset({"stage_define", "stage_put", "stage_run", "stage_drop"})
+STAGE_FORWARDED_FIELDS = ("stage_id", "tensors")
 
 
 @dataclass
@@ -39,14 +45,23 @@ class NetworkProbe:
 @dataclass
 class WorkerNode:
     node_id: str
-    conn: socket.socket
+    conn: socket.socket | None
     cpu_count: int
     device: str
     compute_elements_per_second: float = 0.0
+    heartbeat_interval: float = 2.0
     udp_probe_token: bytes = field(default_factory=lambda: secrets.token_bytes(16))
+    control_token: str = field(default_factory=lambda: secrets.token_hex(16))
     send_lock: threading.Lock = field(default_factory=threading.Lock)
+    sender: Callable[[dict[str, Any], bytes], None] | None = None
+    close_sender: Callable[[], None] | None = None
     last_seen: float = field(default_factory=time.monotonic)
     connected: bool = True
+    control_conn: Any | None = None
+    control_connected: bool = False
+    last_heartbeat: float = field(default_factory=time.monotonic)
+    last_heartbeat_sequence: int = 0
+    liveness_lock: threading.Lock = field(default_factory=threading.Lock)
     metrics_lock: threading.Lock = field(default_factory=threading.Lock)
     pending_probes: dict[str, NetworkProbe] = field(default_factory=dict)
     rtt_samples_ms: deque[float] = field(default_factory=lambda: deque(maxlen=20))
@@ -62,6 +77,11 @@ class WorkerNode:
 
     def send(self, message: dict[str, Any], payload: bytes = b"") -> None:
         with self.send_lock:
+            if self.sender is not None:
+                self.sender(message, payload)
+                return
+            if self.conn is None:
+                raise OSError("worker has no active data transport")
             send_frame(self.conn, message, payload)
 
 
@@ -86,6 +106,8 @@ class Coordinator:
         self.server: socket.socket | None = None
         self.udp_server: socket.socket | None = None
         self.bandwidth_probe_payload = bytes(BANDWIDTH_PROBE_BYTES)
+        self.remote_round_robin = 0
+        self.remote_round_robin_lock = threading.Lock()
 
     def serve_forever(self) -> None:
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -105,6 +127,7 @@ class Coordinator:
                 flush=True,
             )
             threading.Thread(target=self._network_monitor_loop, daemon=True).start()
+            threading.Thread(target=self._liveness_monitor_loop, daemon=True).start()
             threading.Thread(
                 target=self._udp_echo_loop,
                 args=(udp_server,),
@@ -125,6 +148,7 @@ class Coordinator:
     def _handle_connection(self, conn: socket.socket, address: Any) -> None:
         stream = conn.makefile("rb")
         node: WorkerNode | None = None
+        control_node: WorkerNode | None = None
         try:
             frame = receive_frame(stream)
             if frame is None:
@@ -141,10 +165,21 @@ class Coordinator:
                         "node_id": node.node_id,
                         "udp_probe_token": node.udp_probe_token.hex(),
                         "udp_port": self.udp_port,
+                        "control_token": node.control_token,
                     },
                 )
                 print(f"[FSSLK] Worker joined: {node.node_id} from {address}", flush=True)
                 self._worker_loop(node, stream)
+            elif hello.get("role") == "worker_control":
+                if payload:
+                    raise ValueError("worker control registration must not contain a payload")
+                try:
+                    control_node = self._register_control(conn, hello)
+                except ValueError as exc:
+                    send_message(conn, {"type": "control_rejected", "error": str(exc)})
+                    return
+                send_message(conn, {"type": "control_registered", "node_id": control_node.node_id})
+                self._worker_control_loop(control_node, conn, stream)
             elif hello.get("role") == "client":
                 self._handle_client(conn, hello, payload)
             else:
@@ -155,6 +190,8 @@ class Coordinator:
         finally:
             if node is not None:
                 self._unregister_worker(node)
+            if control_node is not None:
+                self._unregister_control(control_node, conn)
             try:
                 stream.close()
             except OSError:
@@ -169,24 +206,158 @@ class Coordinator:
             compute_speed = 0.0
         if not math.isfinite(compute_speed) or compute_speed < 0:
             compute_speed = 0.0
+        try:
+            heartbeat_interval = float(hello.get("heartbeat_interval") or 2.0)
+        except (TypeError, ValueError):
+            heartbeat_interval = 2.0
+        if not math.isfinite(heartbeat_interval) or not 0.1 <= heartbeat_interval <= 60:
+            heartbeat_interval = 2.0
         node = WorkerNode(
             node_id=node_id,
             conn=conn,
             cpu_count=int(hello.get("cpu_count") or 1),
             device=str(hello.get("device") or "cpu"),
             compute_elements_per_second=compute_speed,
+            heartbeat_interval=heartbeat_interval,
         )
         with self.nodes_lock:
             previous = self.nodes.get(node_id)
             if previous is not None:
                 previous.connected = False
-                try:
-                    previous.conn.shutdown(socket.SHUT_RDWR)
-                except OSError:
-                    pass
-                previous.conn.close()
+                self._close_worker_transport(previous)
+                if previous.control_conn is not None:
+                    try:
+                        previous.control_conn.shutdown(socket.SHUT_RDWR)
+                    except (AttributeError, OSError):
+                        pass
+                    try:
+                        previous.control_conn.close()
+                    except (AttributeError, OSError):
+                        pass
             self.nodes[node_id] = node
         return node
+
+    @staticmethod
+    def _close_worker_transport(node: WorkerNode) -> None:
+        if node.close_sender is not None:
+            node.close_sender()
+        if node.conn is not None:
+            try:
+                node.conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            node.conn.close()
+
+    def _register_stream_worker(
+        self,
+        node_id: str,
+        cpu_count: int,
+        device: str,
+        compute_speed: float,
+        heartbeat_interval: float,
+        sender: Callable[[dict[str, Any], bytes], None],
+        close_sender: Callable[[], None],
+    ) -> WorkerNode:
+        node = WorkerNode(
+            node_id=node_id,
+            conn=None,
+            cpu_count=max(1, cpu_count),
+            device=device or "cpu",
+            compute_elements_per_second=max(0.0, compute_speed),
+            heartbeat_interval=(
+                heartbeat_interval if 0.1 <= heartbeat_interval <= 60 else 2.0
+            ),
+            sender=sender,
+            close_sender=close_sender,
+        )
+        with self.nodes_lock:
+            previous = self.nodes.get(node_id)
+            if previous is not None:
+                previous.connected = False
+                self._close_worker_transport(previous)
+                if previous.control_conn is not None:
+                    try:
+                        previous.control_conn.shutdown(socket.SHUT_RDWR)
+                    except (AttributeError, OSError):
+                        pass
+                    try:
+                        previous.control_conn.close()
+                    except (AttributeError, OSError):
+                        pass
+            self.nodes[node_id] = node
+        return node
+
+    def _register_control(self, conn: socket.socket, hello: dict[str, Any]) -> WorkerNode:
+        node_id = hello.get("node_id")
+        token = hello.get("control_token")
+        if not isinstance(node_id, str) or not isinstance(token, str):
+            raise ValueError("worker control registration is missing its identity")
+        if len(token) != 32 or any(char not in "0123456789abcdef" for char in token):
+            raise ValueError("worker control token has an invalid format")
+
+        with self.nodes_lock:
+            node = self.nodes.get(node_id)
+            if node is None or not node.connected:
+                raise ValueError(f"worker {node_id!r} has no active data connection")
+            if not secrets.compare_digest(node.control_token, token):
+                raise ValueError("worker control token is invalid")
+            with node.liveness_lock:
+                previous = node.control_conn
+                node.control_conn = conn
+                node.control_connected = True
+                node.last_heartbeat = time.monotonic()
+                node.last_heartbeat_sequence = 0
+
+        if previous is not None and previous is not conn:
+            try:
+                previous.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            previous.close()
+        return node
+
+    def _worker_control_loop(self, node: WorkerNode, conn: socket.socket, stream: Any) -> None:
+        while True:
+            frame = receive_frame(stream)
+            if frame is None:
+                return
+            message, payload = frame
+            if message.get("type") != "heartbeat" or payload:
+                raise ValueError("worker control channel accepts heartbeat frames only")
+            sequence = message.get("sequence")
+            if (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or sequence <= 0
+            ):
+                raise ValueError("heartbeat sequence must be a positive integer")
+            with node.liveness_lock:
+                if node.control_conn is not conn:
+                    return
+                if sequence <= node.last_heartbeat_sequence:
+                    raise ValueError("heartbeat sequence did not advance")
+                node.last_heartbeat_sequence = sequence
+                node.last_heartbeat = time.monotonic()
+            send_message(conn, {"type": "heartbeat_ack", "sequence": sequence})
+
+    @staticmethod
+    def _unregister_control(node: WorkerNode, conn: socket.socket) -> None:
+        with node.liveness_lock:
+            if node.control_conn is conn:
+                node.control_conn = None
+                node.control_connected = False
+
+    def _worker_liveness(self, node: WorkerNode, now: float | None = None) -> str:
+        now = time.monotonic() if now is None else now
+        lease_timeout = max(self.heartbeat_timeout, node.heartbeat_interval * 3)
+        with node.liveness_lock:
+            age = max(0.0, now - node.last_heartbeat)
+            control_connected = node.control_connected
+        if not node.connected or age > lease_timeout:
+            return "unreachable"
+        if not control_connected or age > lease_timeout / 2:
+            return "suspect"
+        return "healthy"
 
     def _worker_loop(self, node: WorkerNode, stream: Any) -> None:
         while True:
@@ -194,28 +365,47 @@ class Coordinator:
             if frame is None:
                 return
             message, payload = frame
-            kind = message.get("type")
-            if kind == "heartbeat":
-                if payload:
-                    raise ValueError("heartbeat must not contain a binary payload")
-                node.last_seen = time.monotonic()
-            elif kind == "result":
-                if payload:
-                    raise ValueError("worker results must not contain a binary payload")
-                node.last_seen = time.monotonic()
-                task_id = str(message.get("task_id", ""))
-                with self.pending_lock:
-                    pending = self.pending.get(task_id)
-                    if pending is not None and pending.node is node and not pending.future.done():
-                        pending.future.set_result(message)
-            elif kind in {"probe_result", "bandwidth_result"}:
-                if payload:
-                    raise ValueError("network probe results must not contain a binary payload")
-                self._record_network_probe(node, message)
-            elif kind == "packet_loss_result":
-                if payload:
-                    raise ValueError("packet-loss results must not contain a binary payload")
-                self._record_packet_loss_probe(node, message)
+            self._process_worker_message(node, message, payload)
+
+    def _process_worker_message(
+        self, node: WorkerNode, message: dict[str, Any], payload: bytes
+    ) -> None:
+        kind = message.get("type")
+        if kind == "heartbeat":
+            if payload:
+                raise ValueError("heartbeat must not contain a binary payload")
+            node.last_seen = time.monotonic()
+        elif kind == "result":
+            if payload:
+                raise ValueError("worker results must not contain a binary payload")
+            node.last_seen = time.monotonic()
+            task_id = str(message.get("task_id", ""))
+            with self.pending_lock:
+                pending = self.pending.get(task_id)
+                if pending is not None and pending.node is node and not pending.future.done():
+                    pending.future.set_result(message)
+        elif kind == "stage_result":
+            node.last_seen = time.monotonic()
+            task_id = str(message.get("task_id", ""))
+            with self.pending_lock:
+                pending = self.pending.get(task_id)
+                if pending is not None and pending.node is node and not pending.future.done():
+                    pending.future.set_result((message, payload))
+        elif kind == "remote_result":
+            node.last_seen = time.monotonic()
+            task_id = str(message.get("task_id", ""))
+            with self.pending_lock:
+                pending = self.pending.get(task_id)
+                if pending is not None and pending.node is node and not pending.future.done():
+                    pending.future.set_result((message, payload))
+        elif kind in {"probe_result", "bandwidth_result"}:
+            if payload:
+                raise ValueError("network probe results must not contain a binary payload")
+            self._record_network_probe(node, message)
+        elif kind == "packet_loss_result":
+            if payload:
+                raise ValueError("packet-loss results must not contain a binary payload")
+            self._record_packet_loss_probe(node, message)
 
     def _udp_echo_loop(self, udp_server: socket.socket) -> None:
         while True:
@@ -366,6 +556,21 @@ class Coordinator:
             node.connected = False
             if self.nodes.get(node.node_id) is node:
                 del self.nodes[node.node_id]
+            with node.liveness_lock:
+                control_conn = node.control_conn
+                node.control_conn = None
+                node.control_connected = False
+        if node.close_sender is not None:
+            node.close_sender()
+        if control_conn is not None:
+            try:
+                control_conn.shutdown(socket.SHUT_RDWR)
+            except (AttributeError, OSError):
+                pass
+            try:
+                control_conn.close()
+            except (AttributeError, OSError):
+                pass
         with self.pending_lock:
             for pending in self.pending.values():
                 if pending.node is node and not pending.future.done():
@@ -378,13 +583,32 @@ class Coordinator:
         print(f"[FSSLK] Worker left: {node.node_id}", flush=True)
 
     def _active_workers(self) -> list[WorkerNode]:
-        now = time.monotonic()
         with self.nodes_lock:
             return [
                 node
                 for node in self.nodes.values()
-                if node.connected and now - node.last_seen <= self.heartbeat_timeout
+                if node.connected and self._worker_liveness(node) == "healthy"
             ]
+
+    def _liveness_monitor_loop(self) -> None:
+        while True:
+            self._expire_unreachable_workers()
+            time.sleep(1)
+
+    def _expire_unreachable_workers(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        with self.nodes_lock:
+            unreachable = [
+                node
+                for node in self.nodes.values()
+                if node.connected and self._worker_liveness(node, now) == "unreachable"
+            ]
+        for node in unreachable:
+            error = ConnectionError(f"Worker {node.node_id} control heartbeat lease expired")
+            with self.pending_lock:
+                for pending in self.pending.values():
+                    if pending.node is node and not pending.future.done():
+                        pending.future.set_exception(error)
 
     def _handle_client(
         self,
@@ -397,47 +621,7 @@ class Coordinator:
             if payload:
                 send_message(conn, {"type": "response", "ok": False, "error": "status does not accept a payload"})
                 return
-            now = time.monotonic()
-            with self.nodes_lock:
-                registered_nodes = [node for node in self.nodes.values() if node.connected]
-
-            nodes = []
-            for node in registered_nodes:
-                with node.metrics_lock:
-                    stability = (
-                        100 * sum(node.probe_outcomes) / len(node.probe_outcomes)
-                        if node.probe_outcomes
-                        else None
-                    )
-                    nodes.append(
-                        {
-                            "node_id": node.node_id,
-                            "device": node.device,
-                            "cpu_count": node.cpu_count,
-                            "compute_elements_per_second": round(
-                                node.compute_elements_per_second, 1
-                            ),
-                            "state": "active" if now - node.last_seen <= self.heartbeat_timeout else "stale",
-                            "heartbeat_age_seconds": round(now - node.last_seen, 1),
-                            "rtt_ms": round(node.rtt_ms, 2) if node.rtt_ms is not None else None,
-                            "jitter_ms": round(node.jitter_ms, 2) if node.jitter_ms is not None else None,
-                            "bandwidth_mbps": (
-                                round(node.bandwidth_mbps, 2)
-                                if node.bandwidth_mbps is not None
-                                else None
-                            ),
-                            "packet_loss_pct": (
-                                round(node.packet_loss_pct, 2)
-                                if node.packet_loss_pct is not None
-                                else None
-                            ),
-                            "udp_probe_reachable": node.udp_probe_reachable,
-                            "connection_stability_pct": (
-                                round(stability, 1) if stability is not None else None
-                            ),
-                        }
-                    )
-            send_message(conn, {"type": "response", "ok": True, "nodes": nodes})
+            send_message(conn, {"type": "response", "ok": True, "nodes": self.status_nodes()})
             return
 
         if command == "sum":
@@ -454,7 +638,177 @@ class Coordinator:
                 send_message(conn, {"type": "response", "ok": False, "error": str(exc)})
             return
 
+        if command in STAGE_COMMANDS:
+            self._relay_stage(conn, str(command), request, payload)
+            return
+
         send_message(conn, {"type": "response", "ok": False, "error": "Unknown command"})
+
+    def status_nodes(self) -> list[dict[str, Any]]:
+        now = time.monotonic()
+        with self.nodes_lock:
+            registered_nodes = [node for node in self.nodes.values() if node.connected]
+
+        nodes = []
+        for node in registered_nodes:
+            with node.metrics_lock:
+                stability = (
+                    100 * sum(node.probe_outcomes) / len(node.probe_outcomes)
+                    if node.probe_outcomes
+                    else None
+                )
+                liveness = self._worker_liveness(node, now)
+                with node.liveness_lock:
+                    heartbeat_age = max(0.0, now - node.last_heartbeat)
+                    control_connected = node.control_connected
+                nodes.append(
+                    {
+                        "node_id": node.node_id,
+                        "device": node.device,
+                        "cpu_count": node.cpu_count,
+                        "compute_elements_per_second": round(
+                            node.compute_elements_per_second, 1
+                        ),
+                        "state": liveness,
+                        "data_connected": node.connected,
+                        "control_connected": control_connected,
+                        "heartbeat_age_seconds": round(heartbeat_age, 1),
+                        "heartbeat_timeout_seconds": max(
+                            self.heartbeat_timeout, node.heartbeat_interval * 3
+                        ),
+                        "rtt_ms": round(node.rtt_ms, 2) if node.rtt_ms is not None else None,
+                        "jitter_ms": round(node.jitter_ms, 2) if node.jitter_ms is not None else None,
+                        "bandwidth_mbps": (
+                            round(node.bandwidth_mbps, 2)
+                            if node.bandwidth_mbps is not None
+                            else None
+                        ),
+                        "packet_loss_pct": (
+                            round(node.packet_loss_pct, 2)
+                            if node.packet_loss_pct is not None
+                            else None
+                        ),
+                        "udp_probe_reachable": node.udp_probe_reachable,
+                        "connection_stability_pct": (
+                            round(stability, 1) if stability is not None else None
+                        ),
+                    }
+                )
+        return nodes
+
+    def call_stage(
+        self,
+        worker_id: str,
+        command: str,
+        request: dict[str, Any],
+        payload: bytes,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Call one stage operation on a healthy worker and return its reply."""
+        if command not in STAGE_COMMANDS:
+            raise ValueError(f"Unknown stage command: {command!r}")
+        with self.nodes_lock:
+            node = self.nodes.get(worker_id)
+        if node is None or self._worker_liveness(node) != "healthy":
+            raise ConnectionError(f"Unknown or disconnected worker: {worker_id!r}")
+
+        task_id = uuid.uuid4().hex
+        pending = PendingTask(task_id=task_id, node=node, future=Future())
+        with self.pending_lock:
+            self.pending[task_id] = pending
+        try:
+            forwarded: dict[str, Any] = {
+                "type": "stage",
+                "task_id": task_id,
+                "op": command.removeprefix("stage_"),
+            }
+            forwarded.update(
+                {key: request[key] for key in STAGE_FORWARDED_FIELDS if key in request}
+            )
+            node.send(forwarded, payload)
+            reply, reply_payload = pending.future.result(timeout=STAGE_TIMEOUT_SECONDS)
+        except (TimeoutError, ConnectionError, OSError) as exc:
+            raise ConnectionError(f"Worker {node.node_id}: {exc or type(exc).__name__}") from exc
+        finally:
+            with self.pending_lock:
+                self.pending.pop(task_id, None)
+
+        response = {key: value for key, value in reply.items() if key not in {"type", "task_id"}}
+        response.setdefault("ok", False)
+        return response, reply_payload
+
+    def execute_remote(
+        self,
+        payload: bytes,
+        *,
+        worker_id: str | None = None,
+        timeout: float = REMOTE_CALL_TIMEOUT_SECONDS,
+    ) -> bytes:
+        """Run one serialized Python callable on one healthy worker."""
+        if not isinstance(payload, bytes) or len(payload) > MAX_PAYLOAD_BYTES:
+            raise ValueError(f"remote call payload must be bytes up to {MAX_PAYLOAD_BYTES} bytes")
+        if not 0 < timeout <= 3600:
+            raise ValueError("remote call timeout must be between 0 and 3600 seconds")
+
+        workers = sorted(self._active_workers(), key=lambda node: node.node_id)
+        if worker_id is not None:
+            workers = [node for node in workers if node.node_id == worker_id]
+            if not workers:
+                raise ConnectionError(f"Unknown or disconnected worker: {worker_id!r}")
+            node = workers[0]
+        else:
+            if not workers:
+                raise RuntimeError("No active workers are connected")
+            with self.remote_round_robin_lock:
+                node = workers[self.remote_round_robin % len(workers)]
+                self.remote_round_robin += 1
+
+        task_id = uuid.uuid4().hex
+        pending = PendingTask(task_id=task_id, node=node, future=Future())
+        with self.pending_lock:
+            self.pending[task_id] = pending
+        try:
+            node.send(
+                {"type": "task", "task_id": task_id, "operation": "python"},
+                payload,
+            )
+            response, result_payload = pending.future.result(timeout=timeout)
+            if not response.get("ok"):
+                raise RuntimeError(response.get("error", "remote callable failed"))
+            if len(result_payload) > MAX_PAYLOAD_BYTES:
+                raise ValueError("remote result exceeds the 64 MiB payload limit")
+            return result_payload
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"remote call on worker {node.node_id} exceeded {timeout:g} seconds"
+            ) from exc
+        finally:
+            with self.pending_lock:
+                self.pending.pop(task_id, None)
+
+    def _relay_stage(
+        self,
+        conn: socket.socket,
+        command: str,
+        request: dict[str, Any],
+        payload: bytes,
+    ) -> None:
+        """Forward one stage command to the named worker and relay its reply."""
+        try:
+            worker_id = request.get("worker")
+            if not isinstance(worker_id, str):
+                raise ValueError("stage request is missing its worker id")
+            response, reply_payload = self.call_stage(worker_id, command, request, payload)
+        except (TimeoutError, ConnectionError, OSError, ValueError) as exc:
+            send_message(
+                conn,
+                {
+                    "type": "response",
+                    "ok": False,
+                    "error": str(exc),
+                },
+            )
+            return
+        send_frame(conn, {"type": "response", **response}, reply_payload)
 
     def _distributed_sum(self, values: torch.Tensor) -> tuple[int | float, list[str]]:
         if values.numel() == 0:
@@ -580,7 +934,7 @@ class Coordinator:
 class PendingTask:
     task_id: str
     node: WorkerNode
-    future: Future[dict[str, Any]]
+    future: Future[Any]  # a result message, or (message, payload) for stage tasks
 
 
 @dataclass

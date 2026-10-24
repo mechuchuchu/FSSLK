@@ -11,6 +11,8 @@ services:
   coordinator:
     build: .
     command: ["coordinator", "--host", "0.0.0.0", "--port", "27494", "--udp-port", "27495"]
+    environment:
+      FSSLK_DDP_TOKEN: ${FSSLK_DDP_TOKEN:-}
     ports:
       - "27494:27494"
       - "27495:27495/udp"

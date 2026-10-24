@@ -12,6 +12,7 @@ from .coordinator import MAX_TASK_ATTEMPTS, TASK_TIMEOUT_SECONDS, Coordinator
 from .protocol import receive_message, send_frame
 from .tensor import encode_tensor
 from .worker import run_worker
+from .grpc_transport import run_worker_grpc, serve_grpc_forever
 
 
 def _request(
@@ -19,7 +20,21 @@ def _request(
     port: int,
     request: dict[str, Any],
     binary_payload: bytes = b"",
+    transport: str = "grpc",
 ) -> dict[str, Any]:
+    if transport == "grpc":
+        from .grpc_transport import grpc_request
+
+        response, _ = grpc_request(
+            host,
+            port,
+            request,
+            binary_payload,
+            TASK_TIMEOUT_SECONDS * MAX_TASK_ATTEMPTS + 10,
+        )
+        return response
+    if transport != "tcp":
+        raise ValueError(f"unsupported coordinator transport: {transport!r}")
     with socket.create_connection((host, port), timeout=5) as conn:
         conn.settimeout(TASK_TIMEOUT_SECONDS * MAX_TASK_ATTEMPTS + 10)
         stream = conn.makefile("rb")
@@ -41,29 +56,55 @@ def main() -> None:
     coordinator_parser.add_argument("--host", default="0.0.0.0")
     coordinator_parser.add_argument("--port", type=int, default=27494)
     coordinator_parser.add_argument("--udp-port", type=int)
+    coordinator_parser.add_argument("--transport", choices=("grpc", "tcp"), default="grpc")
 
     worker_parser = commands.add_parser("worker", help="join a coordinator as a CPU worker")
     worker_parser.add_argument("--host", default="coordinator")
     worker_parser.add_argument("--port", type=int, default=27494)
     worker_parser.add_argument("--node-id")
+    worker_parser.add_argument("--transport", choices=("grpc", "tcp"), default="grpc")
 
     status_parser = commands.add_parser("status", help="show connected workers")
     status_parser.add_argument("--host", default="127.0.0.1")
     status_parser.add_argument("--port", type=int, default=27494)
+    status_parser.add_argument("--transport", choices=("grpc", "tcp"), default="grpc")
 
     sum_parser = commands.add_parser("run-sum", help="sum a CPU tensor across workers")
     sum_parser.add_argument("--size", type=int, default=16)
     sum_parser.add_argument("--host", default="127.0.0.1")
     sum_parser.add_argument("--port", type=int, default=27494)
+    sum_parser.add_argument("--transport", choices=("grpc", "tcp"), default="grpc")
+
+    from .pipeline import add_arguments as add_pipeline_arguments
+
+    pipeline_parser = commands.add_parser(
+        "run-pipeline",
+        help="run a captured demo model as a two-stage pipeline on two workers",
+    )
+    add_pipeline_arguments(pipeline_parser)
+    inference_parser = commands.add_parser(
+        "run-inference",
+        help="run one distributed forward pass and print only the model output",
+    )
+    add_pipeline_arguments(inference_parser)
 
     args = parser.parse_args()
     try:
         if args.command == "coordinator":
-            Coordinator(args.host, args.port, udp_port=args.udp_port).serve_forever()
+            coordinator = Coordinator(args.host, args.port, udp_port=args.udp_port)
+            if args.transport == "grpc":
+                serve_grpc_forever(coordinator)
+            else:
+                coordinator.serve_forever()
         elif args.command == "worker":
-            run_worker(args.host, args.port, args.node_id)
+            if args.transport == "grpc":
+                run_worker_grpc(args.host, args.port, args.node_id)
+            else:
+                run_worker(args.host, args.port, args.node_id)
         elif args.command == "status":
-            response = _request(args.host, args.port, {"command": "status"})
+            response = _request(
+                args.host, args.port, {"command": "status"}, transport=args.transport
+            )
             if not response.get("ok"):
                 raise RuntimeError(response.get("error", "status request failed"))
             print(json.dumps(response["nodes"], indent=2))
@@ -77,6 +118,7 @@ def main() -> None:
                 args.port,
                 {"command": "sum", **tensor_metadata},
                 binary_payload,
+                args.transport,
             )
             if not response.get("ok"):
                 raise RuntimeError(response.get("error", "distributed task failed"))
@@ -85,6 +127,10 @@ def main() -> None:
             print(f"Distributed result: {response['result']}")
             print(f"Expected result: {expected}")
             print(f"Workers: {', '.join(response['workers'])}")
+        elif args.command in {"run-pipeline", "run-inference"}:
+            from .pipeline import main as run_pipeline_main
+
+            run_pipeline_main(args)
         else:
             parser.error("unknown command")
     except (ConnectionError, OSError, RuntimeError, ValueError) as exc:

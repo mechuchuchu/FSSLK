@@ -6,10 +6,11 @@ description: every operation, the tensors on its edges, an estimate of its
 FLOPs, and for every possible two-stage split the activation bytes that would
 have to cross the network.
 
-This is deliberately *capture only*. The wrapper delegates ``forward`` to the
-original module, so wrapping never changes what the model computes. Nothing is
-shipped to workers yet, and the serialized form is data (op names, shapes,
-dtypes), never pickle, so it can later be validated before a worker runs it.
+Capturing is side-effect free. The wrapper delegates ``forward`` to the
+original module, so wrapping never changes what the model computes. The
+serialized form is data (op names, shapes, dtypes and an encoding of each
+node's arguments, see ``ops.py``), never pickle, so a worker can validate it
+before running anything; ``stage.py`` cuts it into stages and runs them.
 
 Known limits of this first version:
 
@@ -36,6 +37,7 @@ from typing import Any, Sequence
 import torch
 from torch import nn
 
+from .ops import ALLOWED_OPS, call_refs, encode_call
 from .protocol import MAX_PAYLOAD_BYTES
 from .scheduler import NodeCapacity
 from .tensor import _DTYPE_NAMES
@@ -99,6 +101,10 @@ class GraphNode:
     inputs: tuple[str, ...]
     outputs: tuple[TensorInfo, ...]
     flops: int = 0
+    # Key in the module's state_dict, for param and buffer nodes.
+    source: str | None = None
+    # Data-only encoding of the arguments (see ops.py); None if not shippable.
+    call: dict[str, Any] | None = None
 
     @property
     def out_bytes(self) -> int:
@@ -250,6 +256,31 @@ class CapturedGraph:
             )
         return cuts
 
+    # ------------------------------------------------- shipping to workers
+    def shippable_problems(self) -> list[str]:
+        """Why this graph cannot be cut into stages and run on workers (empty if it can)."""
+        problems = []
+        for node in self.nodes:
+            if node.kind == "compute":
+                if node.op not in ALLOWED_OPS:
+                    problems.append(f"{node.name}: {node.op} is not an allowed worker operation")
+                elif node.call is None:
+                    problems.append(f"{node.name}: its arguments cannot be encoded")
+            elif node.kind in ("param", "buffer") and node.source is None:
+                problems.append(f"{node.name}: no state_dict entry to take its value from")
+            elif node.kind == "other":
+                problems.append(f"{node.name}: unsupported graph input")
+            elif node.kind == "output" and node.call is None:
+                problems.append(f"{node.name}: the returned structure cannot be encoded")
+        return problems
+
+    def output_names(self) -> list[str]:
+        """Names of the returned tensors, in the order the module returns them."""
+        outputs = [node for node in self.nodes if node.kind == "output"]
+        if len(outputs) != 1 or outputs[0].call is None:
+            raise ValueError("graph has no encodable output")
+        return call_refs(outputs[0].call)
+
     # ------------------------------------------------- wire protocol checks
     def unsupported_dtypes(self) -> list[str]:
         """Dtypes the current wire protocol cannot encode (only int64/float32)."""
@@ -277,24 +308,7 @@ class CapturedGraph:
             "version": GRAPH_FORMAT_VERSION,
             "module": self.module_name,
             "reference_flops": self.reference_flops,
-            "nodes": [
-                {
-                    "name": node.name,
-                    "kind": node.kind,
-                    "op": node.op,
-                    "inputs": list(node.inputs),
-                    "outputs": [
-                        {
-                            "shape": list(tensor.shape),
-                            "dtype": tensor.dtype,
-                            "nbytes": tensor.nbytes,
-                        }
-                        for tensor in node.outputs
-                    ],
-                    "flops": node.flops,
-                }
-                for node in self.nodes
-            ],
+            "nodes": [_node_to_dict(node) for node in self.nodes],
         }
 
     def to_json(self, **kwargs: Any) -> str:
@@ -356,9 +370,20 @@ class CapturedGraph:
                 ):
                     raise ValueError(f"node {name} has an invalid tensor description")
                 outputs.append(TensorInfo(tuple(shape), dtype, nbytes))
+            source = raw.get("source")
+            if source is not None and (not isinstance(source, str) or len(source) > 256):
+                raise ValueError(f"node {name} has an invalid source")
+            call = raw.get("call")
+            if call is not None:
+                try:
+                    refs = call_refs(call)
+                except ValueError as exc:
+                    raise ValueError(f"node {name} has an invalid call: {exc}") from exc
+                if any(ref not in seen for ref in refs):
+                    raise ValueError(f"node {name} must only read earlier nodes")
             seen.add(name)
             nodes.append(
-                GraphNode(name, kind, op, tuple(inputs), tuple(outputs), flops)
+                GraphNode(name, kind, op, tuple(inputs), tuple(outputs), flops, source, call)
             )
         return cls(module_name, tuple(nodes), reference)
 
@@ -476,6 +501,11 @@ def capture_graph(
         arg_name = getattr(spec.arg, "name", None)
         if arg_name is not None:
             kinds[arg_name] = _KIND_BY_INPUT_SPEC.get(spec.kind.name, "other")
+    signature = program.graph_signature
+    sources: dict[str, str] = {
+        **signature.inputs_to_parameters,
+        **signature.inputs_to_buffers,
+    }
 
     nodes: list[GraphNode] = []
     for fx_node in program.graph.nodes:
@@ -497,6 +527,8 @@ def capture_graph(
                 inputs=tuple(dict.fromkeys(src.name for src in fx_node.all_input_nodes)),
                 outputs=_tensor_infos(fx_node.meta.get("val")),
                 flops=_estimate_flops(fx_node, op) if kind == "compute" else 0,
+                source=sources.get(fx_node.name) if kind in ("param", "buffer") else None,
+                call=encode_call(fx_node) if kind in ("compute", "output") else None,
             )
         )
 
@@ -563,6 +595,25 @@ def wrap(
 
 
 # ---------------------------------------------------------------------- helpers
+def _node_to_dict(node: GraphNode) -> dict[str, Any]:
+    data: dict[str, Any] = {
+        "name": node.name,
+        "kind": node.kind,
+        "op": node.op,
+        "inputs": list(node.inputs),
+        "outputs": [
+            {"shape": list(tensor.shape), "dtype": tensor.dtype, "nbytes": tensor.nbytes}
+            for tensor in node.outputs
+        ],
+        "flops": node.flops,
+    }
+    if node.source is not None:
+        data["source"] = node.source
+    if node.call is not None:
+        data["call"] = node.call
+    return data
+
+
 def _is_count(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
