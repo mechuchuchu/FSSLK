@@ -1,12 +1,37 @@
+x-worker-common: &worker-common
+  build: .
+  entrypoint: ["/bin/sh", "/app/scripts/start_netem_worker.sh"]
+  command: ["--host", "coordinator", "--port", "27494"]
+  depends_on:
+    - coordinator
+  cap_add:
+    - NET_ADMIN
+
 services:
   coordinator:
     build: .
-    command: ["coordinator", "--host", "0.0.0.0", "--port", "27494"]
+    command: ["coordinator", "--host", "0.0.0.0", "--port", "27494", "--udp-port", "27495"]
     ports:
       - "27494:27494"
+      - "27495:27495/udp"
 
-  worker:
-    build: .
-    command: ["worker", "--host", "coordinator", "--port", "27494"]
-    depends_on:
-      - coordinator
+  worker-fast:
+    <<: *worker-common
+    environment:
+      FSSLK_NETEM_DELAY: "2ms"
+      FSSLK_NETEM_RATE: "500mbit"
+      FSSLK_NETEM_LOSS: "0%"
+
+  worker-medium:
+    <<: *worker-common
+    environment:
+      FSSLK_NETEM_DELAY: "25ms"
+      FSSLK_NETEM_RATE: "50mbit"
+      FSSLK_NETEM_LOSS: "1%"
+
+  worker-slow:
+    <<: *worker-common
+    environment:
+      FSSLK_NETEM_DELAY: "75ms"
+      FSSLK_NETEM_RATE: "10mbit"
+      FSSLK_NETEM_LOSS: "3%"

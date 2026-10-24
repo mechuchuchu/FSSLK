@@ -6,17 +6,25 @@ import socket
 import sys
 from typing import Any
 
-from .coordinator import Coordinator
-from .protocol import receive_message, send_message
+import torch
+
+from .coordinator import MAX_TASK_ATTEMPTS, TASK_TIMEOUT_SECONDS, Coordinator
+from .protocol import receive_message, send_frame
+from .tensor import encode_tensor
 from .worker import run_worker
 
 
-def _request(host: str, port: int, payload: dict[str, Any]) -> dict[str, Any]:
+def _request(
+    host: str,
+    port: int,
+    request: dict[str, Any],
+    binary_payload: bytes = b"",
+) -> dict[str, Any]:
     with socket.create_connection((host, port), timeout=5) as conn:
-        conn.settimeout(40)
+        conn.settimeout(TASK_TIMEOUT_SECONDS * MAX_TASK_ATTEMPTS + 10)
         stream = conn.makefile("rb")
         try:
-            send_message(conn, {"role": "client", **payload})
+            send_frame(conn, {"role": "client", **request}, binary_payload)
             response = receive_message(stream)
             if response is None:
                 raise ConnectionError("Coordinator closed the connection without a response")
@@ -32,6 +40,7 @@ def main() -> None:
     coordinator_parser = commands.add_parser("coordinator", help="start a coordinator")
     coordinator_parser.add_argument("--host", default="0.0.0.0")
     coordinator_parser.add_argument("--port", type=int, default=27494)
+    coordinator_parser.add_argument("--udp-port", type=int)
 
     worker_parser = commands.add_parser("worker", help="join a coordinator as a CPU worker")
     worker_parser.add_argument("--host", default="coordinator")
@@ -50,7 +59,7 @@ def main() -> None:
     args = parser.parse_args()
     try:
         if args.command == "coordinator":
-            Coordinator(args.host, args.port).serve_forever()
+            Coordinator(args.host, args.port, udp_port=args.udp_port).serve_forever()
         elif args.command == "worker":
             run_worker(args.host, args.port, args.node_id)
         elif args.command == "status":
@@ -61,11 +70,17 @@ def main() -> None:
         elif args.command == "run-sum":
             if args.size < 1:
                 raise ValueError("--size must be at least 1")
-            values = list(range(args.size))
-            response = _request(args.host, args.port, {"command": "sum", "values": values})
+            values = torch.arange(args.size, dtype=torch.int64, device="cpu")
+            tensor_metadata, binary_payload = encode_tensor(values)
+            response = _request(
+                args.host,
+                args.port,
+                {"command": "sum", **tensor_metadata},
+                binary_payload,
+            )
             if not response.get("ok"):
                 raise RuntimeError(response.get("error", "distributed task failed"))
-            expected = sum(values)
+            expected = values.sum().item()
             print(f"Input elements: {args.size}")
             print(f"Distributed result: {response['result']}")
             print(f"Expected result: {expected}")
