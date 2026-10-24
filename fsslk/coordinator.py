@@ -48,10 +48,17 @@ class WorkerNode:
     cpu_count: int
     device: str
     compute_elements_per_second: float = 0.0
+    heartbeat_interval: float = 2.0
     udp_probe_token: bytes = field(default_factory=lambda: secrets.token_bytes(16))
+    control_token: str = field(default_factory=lambda: secrets.token_hex(16))
     send_lock: threading.Lock = field(default_factory=threading.Lock)
     last_seen: float = field(default_factory=time.monotonic)
     connected: bool = True
+    control_conn: socket.socket | None = None
+    control_connected: bool = False
+    last_heartbeat: float = field(default_factory=time.monotonic)
+    last_heartbeat_sequence: int = 0
+    liveness_lock: threading.Lock = field(default_factory=threading.Lock)
     metrics_lock: threading.Lock = field(default_factory=threading.Lock)
     pending_probes: dict[str, NetworkProbe] = field(default_factory=dict)
     rtt_samples_ms: deque[float] = field(default_factory=lambda: deque(maxlen=20))
@@ -110,6 +117,7 @@ class Coordinator:
                 flush=True,
             )
             threading.Thread(target=self._network_monitor_loop, daemon=True).start()
+            threading.Thread(target=self._liveness_monitor_loop, daemon=True).start()
             threading.Thread(
                 target=self._udp_echo_loop,
                 args=(udp_server,),
@@ -130,6 +138,7 @@ class Coordinator:
     def _handle_connection(self, conn: socket.socket, address: Any) -> None:
         stream = conn.makefile("rb")
         node: WorkerNode | None = None
+        control_node: WorkerNode | None = None
         try:
             frame = receive_frame(stream)
             if frame is None:
@@ -146,10 +155,21 @@ class Coordinator:
                         "node_id": node.node_id,
                         "udp_probe_token": node.udp_probe_token.hex(),
                         "udp_port": self.udp_port,
+                        "control_token": node.control_token,
                     },
                 )
                 print(f"[FSSLK] Worker joined: {node.node_id} from {address}", flush=True)
                 self._worker_loop(node, stream)
+            elif hello.get("role") == "worker_control":
+                if payload:
+                    raise ValueError("worker control registration must not contain a payload")
+                try:
+                    control_node = self._register_control(conn, hello)
+                except ValueError as exc:
+                    send_message(conn, {"type": "control_rejected", "error": str(exc)})
+                    return
+                send_message(conn, {"type": "control_registered", "node_id": control_node.node_id})
+                self._worker_control_loop(control_node, conn, stream)
             elif hello.get("role") == "client":
                 self._handle_client(conn, hello, payload)
             else:
@@ -160,6 +180,8 @@ class Coordinator:
         finally:
             if node is not None:
                 self._unregister_worker(node)
+            if control_node is not None:
+                self._unregister_control(control_node, conn)
             try:
                 stream.close()
             except OSError:
@@ -174,12 +196,19 @@ class Coordinator:
             compute_speed = 0.0
         if not math.isfinite(compute_speed) or compute_speed < 0:
             compute_speed = 0.0
+        try:
+            heartbeat_interval = float(hello.get("heartbeat_interval") or 2.0)
+        except (TypeError, ValueError):
+            heartbeat_interval = 2.0
+        if not math.isfinite(heartbeat_interval) or not 0.1 <= heartbeat_interval <= 60:
+            heartbeat_interval = 2.0
         node = WorkerNode(
             node_id=node_id,
             conn=conn,
             cpu_count=int(hello.get("cpu_count") or 1),
             device=str(hello.get("device") or "cpu"),
             compute_elements_per_second=compute_speed,
+            heartbeat_interval=heartbeat_interval,
         )
         with self.nodes_lock:
             previous = self.nodes.get(node_id)
@@ -190,8 +219,86 @@ class Coordinator:
                 except OSError:
                     pass
                 previous.conn.close()
+                if previous.control_conn is not None:
+                    try:
+                        previous.control_conn.shutdown(socket.SHUT_RDWR)
+                    except OSError:
+                        pass
+                    previous.control_conn.close()
             self.nodes[node_id] = node
         return node
+
+    def _register_control(self, conn: socket.socket, hello: dict[str, Any]) -> WorkerNode:
+        node_id = hello.get("node_id")
+        token = hello.get("control_token")
+        if not isinstance(node_id, str) or not isinstance(token, str):
+            raise ValueError("worker control registration is missing its identity")
+        if len(token) != 32 or any(char not in "0123456789abcdef" for char in token):
+            raise ValueError("worker control token has an invalid format")
+
+        with self.nodes_lock:
+            node = self.nodes.get(node_id)
+            if node is None or not node.connected:
+                raise ValueError(f"worker {node_id!r} has no active data connection")
+            if not secrets.compare_digest(node.control_token, token):
+                raise ValueError("worker control token is invalid")
+            with node.liveness_lock:
+                previous = node.control_conn
+                node.control_conn = conn
+                node.control_connected = True
+                node.last_heartbeat = time.monotonic()
+                node.last_heartbeat_sequence = 0
+
+        if previous is not None and previous is not conn:
+            try:
+                previous.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            previous.close()
+        return node
+
+    def _worker_control_loop(self, node: WorkerNode, conn: socket.socket, stream: Any) -> None:
+        while True:
+            frame = receive_frame(stream)
+            if frame is None:
+                return
+            message, payload = frame
+            if message.get("type") != "heartbeat" or payload:
+                raise ValueError("worker control channel accepts heartbeat frames only")
+            sequence = message.get("sequence")
+            if (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or sequence <= 0
+            ):
+                raise ValueError("heartbeat sequence must be a positive integer")
+            with node.liveness_lock:
+                if node.control_conn is not conn:
+                    return
+                if sequence <= node.last_heartbeat_sequence:
+                    raise ValueError("heartbeat sequence did not advance")
+                node.last_heartbeat_sequence = sequence
+                node.last_heartbeat = time.monotonic()
+            send_message(conn, {"type": "heartbeat_ack", "sequence": sequence})
+
+    @staticmethod
+    def _unregister_control(node: WorkerNode, conn: socket.socket) -> None:
+        with node.liveness_lock:
+            if node.control_conn is conn:
+                node.control_conn = None
+                node.control_connected = False
+
+    def _worker_liveness(self, node: WorkerNode, now: float | None = None) -> str:
+        now = time.monotonic() if now is None else now
+        lease_timeout = max(self.heartbeat_timeout, node.heartbeat_interval * 3)
+        with node.liveness_lock:
+            age = max(0.0, now - node.last_heartbeat)
+            control_connected = node.control_connected
+        if not node.connected or age > lease_timeout:
+            return "unreachable"
+        if not control_connected or age > lease_timeout / 2:
+            return "suspect"
+        return "healthy"
 
     def _worker_loop(self, node: WorkerNode, stream: Any) -> None:
         while True:
@@ -379,6 +486,16 @@ class Coordinator:
             node.connected = False
             if self.nodes.get(node.node_id) is node:
                 del self.nodes[node.node_id]
+            with node.liveness_lock:
+                control_conn = node.control_conn
+                node.control_conn = None
+                node.control_connected = False
+        if control_conn is not None:
+            try:
+                control_conn.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            control_conn.close()
         with self.pending_lock:
             for pending in self.pending.values():
                 if pending.node is node and not pending.future.done():
@@ -391,13 +508,32 @@ class Coordinator:
         print(f"[FSSLK] Worker left: {node.node_id}", flush=True)
 
     def _active_workers(self) -> list[WorkerNode]:
-        now = time.monotonic()
         with self.nodes_lock:
             return [
                 node
                 for node in self.nodes.values()
-                if node.connected and now - node.last_seen <= self.heartbeat_timeout
+                if node.connected and self._worker_liveness(node) == "healthy"
             ]
+
+    def _liveness_monitor_loop(self) -> None:
+        while True:
+            self._expire_unreachable_workers()
+            time.sleep(1)
+
+    def _expire_unreachable_workers(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        with self.nodes_lock:
+            unreachable = [
+                node
+                for node in self.nodes.values()
+                if node.connected and self._worker_liveness(node, now) == "unreachable"
+            ]
+        for node in unreachable:
+            error = ConnectionError(f"Worker {node.node_id} control heartbeat lease expired")
+            with self.pending_lock:
+                for pending in self.pending.values():
+                    if pending.node is node and not pending.future.done():
+                        pending.future.set_exception(error)
 
     def _handle_client(
         self,
@@ -422,6 +558,10 @@ class Coordinator:
                         if node.probe_outcomes
                         else None
                     )
+                    liveness = self._worker_liveness(node, now)
+                    with node.liveness_lock:
+                        heartbeat_age = max(0.0, now - node.last_heartbeat)
+                        control_connected = node.control_connected
                     nodes.append(
                         {
                             "node_id": node.node_id,
@@ -430,8 +570,13 @@ class Coordinator:
                             "compute_elements_per_second": round(
                                 node.compute_elements_per_second, 1
                             ),
-                            "state": "active" if now - node.last_seen <= self.heartbeat_timeout else "stale",
-                            "heartbeat_age_seconds": round(now - node.last_seen, 1),
+                            "state": liveness,
+                            "data_connected": node.connected,
+                            "control_connected": control_connected,
+                            "heartbeat_age_seconds": round(heartbeat_age, 1),
+                            "heartbeat_timeout_seconds": max(
+                                self.heartbeat_timeout, node.heartbeat_interval * 3
+                            ),
                             "rtt_ms": round(node.rtt_ms, 2) if node.rtt_ms is not None else None,
                             "jitter_ms": round(node.jitter_ms, 2) if node.jitter_ms is not None else None,
                             "bandwidth_mbps": (
@@ -484,7 +629,7 @@ class Coordinator:
         worker_id = request.get("worker")
         with self.nodes_lock:
             node = self.nodes.get(worker_id) if isinstance(worker_id, str) else None
-        if node is None or not node.connected:
+        if node is None or self._worker_liveness(node) != "healthy":
             send_message(
                 conn,
                 {"type": "response", "ok": False, "error": f"Unknown or disconnected worker: {worker_id!r}"},

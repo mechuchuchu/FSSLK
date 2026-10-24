@@ -23,7 +23,13 @@ class CoordinatorRetryTests(unittest.TestCase):
     def make_coordinator(self, worker_count: int) -> tuple[Coordinator, list[WorkerNode]]:
         coordinator = Coordinator("127.0.0.1", 27494)
         workers = [
-            WorkerNode(node_id=f"worker-{index}", conn=Mock(), cpu_count=1, device="cpu")
+            WorkerNode(
+                node_id=f"worker-{index}",
+                conn=Mock(),
+                cpu_count=1,
+                device="cpu",
+                control_connected=True,
+            )
             for index in range(worker_count)
         ]
         coordinator.nodes = {worker.node_id: worker for worker in workers}
@@ -170,6 +176,8 @@ class CoordinatorRetryTests(unittest.TestCase):
         self.assertIsNotNone(response)
         assert response is not None
         node_status = response["nodes"][0]
+        self.assertEqual(node_status["state"], "healthy")
+        self.assertTrue(node_status["control_connected"])
         self.assertGreater(node_status["rtt_ms"], 0)
         self.assertGreater(node_status["jitter_ms"], 0)
         self.assertGreater(node_status["bandwidth_mbps"], 0)
