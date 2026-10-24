@@ -21,7 +21,13 @@ from .coordinator import (
     REMOTE_CALL_TIMEOUT_SECONDS,
     STAGE_COMMANDS,
 )
-from .protocol import MAX_PAYLOAD_BYTES
+from .protocol import (
+    MAX_PAYLOAD_BYTES,
+    MAX_REMOTE_CALL_BYTES,
+    iter_payload_chunks,
+    payload_chunk_count,
+    validate_payload_chunk,
+)
 from .tensor import decode_tensor
 from .proto import fsslk_pb2, fsslk_pb2_grpc
 
@@ -54,6 +60,87 @@ def _channel_options() -> tuple[tuple[str, int], ...]:
 
 def _reply(metadata: dict[str, Any], payload: bytes = b"") -> fsslk_pb2.RpcReply:
     return fsslk_pb2.RpcReply(metadata_json=_dump_json(metadata), payload=payload)
+
+
+def _send_remote_result(
+    send: Any,
+    task_id: str,
+    result: dict[str, Any],
+    payload: bytes,
+) -> None:
+    if len(payload) > MAX_REMOTE_CALL_BYTES:
+        result = {
+            "ok": False,
+            "error": f"remote result exceeds the {MAX_REMOTE_CALL_BYTES}-byte total limit",
+        }
+        payload = b""
+    count = payload_chunk_count(len(payload))
+    for index, chunk in enumerate(iter_payload_chunks(payload)):
+        send(
+            {
+                "type": "remote_result_chunk",
+                "task_id": task_id,
+                "chunk_index": index,
+                "chunk_count": count,
+                "total_size": len(payload),
+                **result,
+            },
+            chunk,
+        )
+
+
+def _append_remote_chunk(
+    transfers: dict[str, dict[str, Any]],
+    task_id: str,
+    message: dict[str, Any],
+    payload: bytes,
+) -> bytes | None:
+    chunk_index = message.get("chunk_index")
+    chunk_count = message.get("chunk_count")
+    total_size = message.get("total_size")
+    if any(
+        not isinstance(value, int) or isinstance(value, bool)
+        for value in (chunk_index, chunk_count, total_size)
+    ):
+        raise ValueError("remote call chunk metadata is invalid")
+    validate_payload_chunk(
+        payload,
+        chunk_index=chunk_index,
+        chunk_count=chunk_count,
+        total_size=total_size,
+    )
+
+    transfer = transfers.get(task_id)
+    if transfer is None:
+        if chunk_index != 0:
+            raise ValueError("remote call chunks arrived out of order")
+        transfer = {
+            "chunk_count": chunk_count,
+            "total_size": total_size,
+            "chunks": [],
+            "received_size": 0,
+        }
+        transfers[task_id] = transfer
+    elif (
+        transfer["chunk_count"] != chunk_count
+        or transfer["total_size"] != total_size
+        or chunk_index != len(transfer["chunks"])
+    ):
+        transfers.pop(task_id, None)
+        raise ValueError("remote call chunks are inconsistent or out of order")
+
+    transfer["chunks"].append(payload)
+    transfer["received_size"] += len(payload)
+    if transfer["received_size"] > MAX_REMOTE_CALL_BYTES:
+        transfers.pop(task_id, None)
+        raise ValueError("remote call exceeds the configured total limit")
+    if len(transfer["chunks"]) != chunk_count:
+        return None
+
+    transfers.pop(task_id, None)
+    if transfer["received_size"] != total_size:
+        raise ValueError("remote call size does not match its metadata")
+    return b"".join(transfer["chunks"])
 
 
 class CoordinatorGrpcService(fsslk_pb2_grpc.FSSLKServicer):
@@ -241,27 +328,87 @@ class CoordinatorGrpcService(fsslk_pb2_grpc.FSSLKServicer):
 
     def Execute(
         self,
-        request: fsslk_pb2.RemoteCallRequest,
+        request_iterator: Iterator[fsslk_pb2.RemoteCallRequest],
         context: grpc.ServicerContext,
-    ) -> fsslk_pb2.RemoteCallReply:
+    ) -> Iterator[fsslk_pb2.RemoteCallReply]:
+        requests = iter(request_iterator)
+        first = next(requests, None)
+        if first is None:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, "remote call has no payload chunks")
         expected_token = os.environ.get("FSSLK_DDP_TOKEN")
         if not expected_token:
             context.abort(
                 grpc.StatusCode.FAILED_PRECONDITION,
                 "remote Python calls are disabled; configure FSSLK_DDP_TOKEN",
             )
-        if not secrets.compare_digest(expected_token, request.token):
+        if not secrets.compare_digest(expected_token, first.token):
             context.abort(grpc.StatusCode.PERMISSION_DENIED, "FSSLK_DDP_TOKEN is invalid")
-        timeout = request.timeout_seconds or REMOTE_CALL_TIMEOUT_SECONDS
+
+        try:
+            validate_payload_chunk(
+                first.payload,
+                chunk_index=first.chunk_index,
+                chunk_count=first.chunk_count,
+                total_size=first.total_size,
+            )
+            if first.chunk_index != 0:
+                raise ValueError("remote call must start with chunk zero")
+            payload_parts = [first.payload]
+            received_size = len(first.payload)
+            timeout = first.timeout_seconds or REMOTE_CALL_TIMEOUT_SECONDS
+            worker_id = first.worker_id
+            chunk_count = first.chunk_count
+
+            for expected_index, request in enumerate(requests, start=1):
+                if (
+                    request.worker_id != worker_id
+                    or request.timeout_seconds != first.timeout_seconds
+                    or request.chunk_count != chunk_count
+                    or request.total_size != first.total_size
+                    or not secrets.compare_digest(expected_token, request.token)
+                ):
+                    raise ValueError("remote call chunk metadata changed during upload")
+                validate_payload_chunk(
+                    request.payload,
+                    chunk_index=request.chunk_index,
+                    chunk_count=request.chunk_count,
+                    total_size=request.total_size,
+                )
+                if request.chunk_index != expected_index:
+                    raise ValueError("remote call chunks arrived out of order")
+                payload_parts.append(request.payload)
+                received_size += len(request.payload)
+
+            if len(payload_parts) != chunk_count or received_size != first.total_size:
+                raise ValueError("remote call upload ended before all chunks arrived")
+            payload = b"".join(payload_parts)
+            payload_parts.clear()
+        except ValueError as exc:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(exc))
+
         try:
             result = self.coordinator.execute_remote(
-                request.payload,
-                worker_id=request.worker_id or None,
+                payload,
+                worker_id=worker_id or None,
                 timeout=timeout,
             )
-            return fsslk_pb2.RemoteCallReply(ok=True, payload=result)
+            count = payload_chunk_count(len(result))
+            for index, chunk in enumerate(iter_payload_chunks(result)):
+                yield fsslk_pb2.RemoteCallReply(
+                    ok=True,
+                    payload=chunk,
+                    chunk_index=index,
+                    chunk_count=count,
+                    total_size=len(result),
+                )
         except (ValueError, RuntimeError, TimeoutError, ConnectionError, OSError) as exc:
-            return fsslk_pb2.RemoteCallReply(ok=False, error=str(exc))
+            yield fsslk_pb2.RemoteCallReply(
+                ok=False,
+                error=str(exc),
+                chunk_index=0,
+                chunk_count=1,
+                total_size=0,
+            )
 
 
 def serve_grpc_forever(coordinator: Coordinator) -> None:
@@ -349,19 +496,65 @@ def execute_remote_request(
     payload: bytes,
     rpc_timeout: float,
 ) -> fsslk_pb2.RemoteCallReply:
-    """Send one authenticated, serialized callable request to the coordinator."""
+    """Stream a serialized callable request and reassemble its result."""
     try:
         with grpc.insecure_channel(f"{host}:{port}", options=_channel_options()) as channel:
             stub = fsslk_pb2_grpc.FSSLKStub(channel)
-            return stub.Execute(
-                fsslk_pb2.RemoteCallRequest(
-                    worker_id=worker_id or "",
-                    token=token,
-                    timeout_seconds=timeout_seconds,
-                    payload=payload,
-                ),
-                timeout=rpc_timeout,
-            )
+
+            count = payload_chunk_count(len(payload))
+
+            def request_chunks() -> Iterator[fsslk_pb2.RemoteCallRequest]:
+                for index, chunk in enumerate(iter_payload_chunks(payload)):
+                    yield fsslk_pb2.RemoteCallRequest(
+                        worker_id=worker_id or "",
+                        token=token,
+                        timeout_seconds=timeout_seconds,
+                        payload=chunk,
+                        chunk_index=index,
+                        chunk_count=count,
+                        total_size=len(payload),
+                    )
+
+            responses = iter(stub.Execute(request_chunks(), timeout=rpc_timeout))
+            first = next(responses, None)
+            if first is None:
+                raise ConnectionError("Coordinator returned no remote-call result")
+            if not first.ok:
+                return first
+
+            try:
+                validate_payload_chunk(
+                    first.payload,
+                    chunk_index=first.chunk_index,
+                    chunk_count=first.chunk_count,
+                    total_size=first.total_size,
+                )
+                if first.chunk_index != 0:
+                    raise ValueError("remote result must start with chunk zero")
+                result_parts = [first.payload]
+                result_size = len(first.payload)
+                for expected_index, response in enumerate(responses, start=1):
+                    if (
+                        not response.ok
+                        or response.chunk_count != first.chunk_count
+                        or response.total_size != first.total_size
+                    ):
+                        raise ValueError("remote result chunk metadata changed")
+                    validate_payload_chunk(
+                        response.payload,
+                        chunk_index=response.chunk_index,
+                        chunk_count=response.chunk_count,
+                        total_size=response.total_size,
+                    )
+                    if response.chunk_index != expected_index:
+                        raise ValueError("remote result chunks arrived out of order")
+                    result_parts.append(response.payload)
+                    result_size += len(response.payload)
+                if len(result_parts) != first.chunk_count or result_size != first.total_size:
+                    raise ValueError("remote result stream ended before all chunks arrived")
+            except ValueError as exc:
+                raise ConnectionError(f"Coordinator returned an invalid remote result: {exc}") from exc
+            return fsslk_pb2.RemoteCallReply(ok=True, payload=b"".join(result_parts))
     except grpc.RpcError as exc:
         details = exc.details() or exc.code().name
         raise ConnectionError(f"gRPC remote call failed: {details}") from exc
@@ -433,6 +626,7 @@ def _run_grpc_worker_session(
     )
     stop = threading.Event()
     stages: dict[str, Any] = {}
+    remote_payloads: dict[str, dict[str, Any]] = {}
     link = link_emulation_type.from_env()
 
     def send(message: dict[str, Any], payload: bytes = b"") -> None:
@@ -573,14 +767,36 @@ def _run_grpc_worker_session(
                 )
             elif command.type == "task":
                 task_id = command.task_id
-                if message.get("operation") == "python":
+                operation = message.get("operation")
+                if operation == "python_fragment":
+                    from .ddp import _execute_payload
+
+                    try:
+                        complete_payload = _append_remote_chunk(
+                            remote_payloads,
+                            task_id,
+                            message,
+                            payload,
+                        )
+                    except ValueError as exc:
+                        remote_payloads.pop(task_id, None)
+                        _send_remote_result(
+                            send,
+                            task_id,
+                            {"ok": False, "error": str(exc)},
+                            b"",
+                        )
+                        continue
+                    if complete_payload is None:
+                        continue
+                    result, result_payload = _execute_payload(complete_payload)
+                    _send_remote_result(send, task_id, result, result_payload)
+                elif operation == "python":
+                    # Accept one-frame calls from older coordinator versions.
                     from .ddp import _execute_payload
 
                     result, result_payload = _execute_payload(payload)
-                    send(
-                        {"type": "remote_result", "task_id": task_id, **result},
-                        result_payload,
-                    )
+                    _send_remote_result(send, task_id, result, result_payload)
                 else:
                     try:
                         result = compute(message, payload)

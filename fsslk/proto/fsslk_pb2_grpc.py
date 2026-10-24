@@ -59,7 +59,7 @@ class FSSLKStub(object):
                 request_serializer=fsslk_dot_proto_dot_fsslk__pb2.StageRequest.SerializeToString,
                 response_deserializer=fsslk_dot_proto_dot_fsslk__pb2.RpcReply.FromString,
                 _registered_method=True)
-        self.Execute = channel.unary_unary(
+        self.Execute = channel.stream_stream(
                 '/fsslk.transport.v1.FSSLK/Execute',
                 request_serializer=fsslk_dot_proto_dot_fsslk__pb2.RemoteCallRequest.SerializeToString,
                 response_deserializer=fsslk_dot_proto_dot_fsslk__pb2.RemoteCallReply.FromString,
@@ -99,7 +99,7 @@ class FSSLKServicer(object):
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
-    def Execute(self, request, context):
+    def Execute(self, request_iterator, context):
         """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
@@ -133,7 +133,7 @@ def add_FSSLKServicer_to_server(servicer, server):
                     request_deserializer=fsslk_dot_proto_dot_fsslk__pb2.StageRequest.FromString,
                     response_serializer=fsslk_dot_proto_dot_fsslk__pb2.RpcReply.SerializeToString,
             ),
-            'Execute': grpc.unary_unary_rpc_method_handler(
+            'Execute': grpc.stream_stream_rpc_method_handler(
                     servicer.Execute,
                     request_deserializer=fsslk_dot_proto_dot_fsslk__pb2.RemoteCallRequest.FromString,
                     response_serializer=fsslk_dot_proto_dot_fsslk__pb2.RemoteCallReply.SerializeToString,
@@ -285,7 +285,7 @@ class FSSLK(object):
             _registered_method=True)
 
     @staticmethod
-    def Execute(request,
+    def Execute(request_iterator,
             target,
             options=(),
             channel_credentials=None,
@@ -295,8 +295,8 @@ class FSSLK(object):
             wait_for_ready=None,
             timeout=None,
             metadata=None):
-        return grpc.experimental.unary_unary(
-            request,
+        return grpc.experimental.stream_stream(
+            request_iterator,
             target,
             '/fsslk.transport.v1.FSSLK/Execute',
             fsslk_dot_proto_dot_fsslk__pb2.RemoteCallRequest.SerializeToString,

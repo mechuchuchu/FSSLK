@@ -15,7 +15,15 @@ from typing import Any, Callable
 
 import torch
 
-from .protocol import MAX_PAYLOAD_BYTES, receive_frame, send_frame, send_message
+from .protocol import (
+    MAX_REMOTE_CALL_BYTES,
+    iter_payload_chunks,
+    payload_chunk_count,
+    receive_frame,
+    send_frame,
+    send_message,
+    validate_payload_chunk,
+)
 from .scheduler import NodeCapacity, allocate_chunks
 from .tensor import decode_tensor, encode_tensor
 from .udp_probe import UDP_PROBE_PACKET, decode_probe_packet
@@ -398,6 +406,65 @@ class Coordinator:
                 pending = self.pending.get(task_id)
                 if pending is not None and pending.node is node and not pending.future.done():
                     pending.future.set_result((message, payload))
+        elif kind == "remote_result_chunk":
+            node.last_seen = time.monotonic()
+            task_id = str(message.get("task_id", ""))
+            with self.pending_lock:
+                pending = self.pending.get(task_id)
+                if pending is None or pending.node is not node or pending.future.done():
+                    return
+                try:
+                    chunk_index = message.get("chunk_index")
+                    chunk_count = message.get("chunk_count")
+                    total_size = message.get("total_size")
+                    if any(
+                        not isinstance(value, int) or isinstance(value, bool)
+                        for value in (chunk_index, chunk_count, total_size)
+                    ):
+                        raise ValueError("remote result chunk metadata is invalid")
+                    validate_payload_chunk(
+                        payload,
+                        chunk_index=chunk_index,
+                        chunk_count=chunk_count,
+                        total_size=total_size,
+                    )
+                    if pending.remote_chunk_count is None:
+                        if chunk_index != 0:
+                            raise ValueError("remote result chunks arrived out of order")
+                        result_ok = message.get("ok")
+                        result_error = message.get("error", "")
+                        if not isinstance(result_ok, bool) or not isinstance(result_error, str):
+                            raise ValueError("remote result status metadata is invalid")
+                        pending.remote_chunk_count = chunk_count
+                        pending.remote_total_size = total_size
+                        pending.remote_ok = result_ok
+                        pending.remote_error = result_error
+                    elif (
+                        pending.remote_chunk_count != chunk_count
+                        or pending.remote_total_size != total_size
+                        or chunk_index != len(pending.remote_chunks)
+                        or message.get("ok") != pending.remote_ok
+                        or message.get("error", "") != pending.remote_error
+                    ):
+                        raise ValueError("remote result chunks are inconsistent or out of order")
+                    pending.remote_chunks.append(payload)
+                    pending.remote_bytes += len(payload)
+                    if pending.remote_bytes > MAX_REMOTE_CALL_BYTES:
+                        raise ValueError("remote result exceeds the configured total limit")
+                    if len(pending.remote_chunks) == chunk_count:
+                        if pending.remote_bytes != total_size:
+                            raise ValueError("remote result size does not match its metadata")
+                        response = {
+                            "ok": pending.remote_ok,
+                            "error": pending.remote_error,
+                        }
+                        result_payload = b"".join(pending.remote_chunks)
+                        pending.remote_chunks.clear()
+                        pending.future.set_result(
+                            (response, result_payload)
+                        )
+                except ValueError as exc:
+                    pending.future.set_exception(exc)
         elif kind in {"probe_result", "bandwidth_result"}:
             if payload:
                 raise ValueError("network probe results must not contain a binary payload")
@@ -744,8 +811,10 @@ class Coordinator:
         timeout: float = REMOTE_CALL_TIMEOUT_SECONDS,
     ) -> bytes:
         """Run one serialized Python callable on one healthy worker."""
-        if not isinstance(payload, bytes) or len(payload) > MAX_PAYLOAD_BYTES:
-            raise ValueError(f"remote call payload must be bytes up to {MAX_PAYLOAD_BYTES} bytes")
+        if not isinstance(payload, bytes) or len(payload) > MAX_REMOTE_CALL_BYTES:
+            raise ValueError(
+                f"remote call payload must be bytes up to {MAX_REMOTE_CALL_BYTES} bytes"
+            )
         if not 0 < timeout <= 3600:
             raise ValueError("remote call timeout must be between 0 and 3600 seconds")
 
@@ -767,15 +836,24 @@ class Coordinator:
         with self.pending_lock:
             self.pending[task_id] = pending
         try:
-            node.send(
-                {"type": "task", "task_id": task_id, "operation": "python"},
-                payload,
-            )
+            chunk_count = payload_chunk_count(len(payload))
+            for chunk_index, chunk in enumerate(iter_payload_chunks(payload)):
+                node.send(
+                    {
+                        "type": "task",
+                        "task_id": task_id,
+                        "operation": "python_fragment",
+                        "chunk_index": chunk_index,
+                        "chunk_count": chunk_count,
+                        "total_size": len(payload),
+                    },
+                    chunk,
+                )
             response, result_payload = pending.future.result(timeout=timeout)
             if not response.get("ok"):
                 raise RuntimeError(response.get("error", "remote callable failed"))
-            if len(result_payload) > MAX_PAYLOAD_BYTES:
-                raise ValueError("remote result exceeds the 64 MiB payload limit")
+            if len(result_payload) > MAX_REMOTE_CALL_BYTES:
+                raise ValueError("remote result exceeds the configured total limit")
             return result_payload
         except TimeoutError as exc:
             raise TimeoutError(
@@ -935,6 +1013,12 @@ class PendingTask:
     task_id: str
     node: WorkerNode
     future: Future[Any]  # a result message, or (message, payload) for stage tasks
+    remote_chunk_count: int | None = None
+    remote_total_size: int | None = None
+    remote_ok: bool | None = None
+    remote_error: str | None = None
+    remote_chunks: list[bytes] = field(default_factory=list)
+    remote_bytes: int = 0
 
 
 @dataclass

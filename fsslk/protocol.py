@@ -3,14 +3,72 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
-from typing import Any, BinaryIO
+from typing import Any, BinaryIO, Iterator
 
 
 MAX_HEADER_BYTES = 64 * 1024
-MAX_PAYLOAD_BYTES = 64 * 1024 * 1024
+
+
+def _positive_env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise RuntimeError(f"{name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise RuntimeError(f"{name} must be a positive integer")
+    return parsed
+
+
+MAX_PAYLOAD_BYTES = _positive_env_int("FSSLK_MAX_PAYLOAD_BYTES", 64 * 1024 * 1024)
+MAX_REMOTE_CALL_BYTES = _positive_env_int(
+    "FSSLK_MAX_REMOTE_CALL_BYTES", 1024 * 1024 * 1024
+)
 _HEADER_SIZE = struct.Struct("!I")
+
+
+def payload_chunk_count(total_size: int) -> int:
+    if not isinstance(total_size, int) or isinstance(total_size, bool) or total_size < 0:
+        raise ValueError("payload size must be a non-negative integer")
+    if total_size > MAX_REMOTE_CALL_BYTES:
+        raise ValueError(
+            f"remote call payload exceeds the {MAX_REMOTE_CALL_BYTES}-byte total limit"
+        )
+    return max(1, (total_size + MAX_PAYLOAD_BYTES - 1) // MAX_PAYLOAD_BYTES)
+
+
+def iter_payload_chunks(payload: bytes) -> Iterator[bytes]:
+    if not isinstance(payload, bytes):
+        raise TypeError("payload must be bytes")
+    count = payload_chunk_count(len(payload))
+    for index in range(count):
+        start = index * MAX_PAYLOAD_BYTES
+        yield payload[start : start + MAX_PAYLOAD_BYTES]
+
+
+def validate_payload_chunk(
+    payload: bytes,
+    *,
+    chunk_index: int,
+    chunk_count: int,
+    total_size: int,
+) -> None:
+    expected_count = payload_chunk_count(total_size)
+    if chunk_count != expected_count:
+        raise ValueError("payload chunk count does not match total size")
+    if not 0 <= chunk_index < chunk_count:
+        raise ValueError("payload chunk index is out of range")
+    expected_size = min(
+        MAX_PAYLOAD_BYTES,
+        max(total_size - chunk_index * MAX_PAYLOAD_BYTES, 0),
+    )
+    if len(payload) != expected_size:
+        raise ValueError("payload chunk size does not match its position")
 
 
 def send_frame(sock: socket.socket, message: dict[str, Any], payload: bytes = b"") -> None:

@@ -14,7 +14,7 @@ from typing import Any, Callable
 
 import cloudpickle
 
-from .protocol import MAX_PAYLOAD_BYTES
+from .protocol import MAX_REMOTE_CALL_BYTES
 
 _CLOUDPICKLE_LOCK = threading.RLock()
 _SHARDS_PER_WORKER = 4
@@ -184,8 +184,10 @@ def _invoke_remote_job(
     timeout: float,
 ) -> Any:
     payload = _serialize_job(job)
-    if len(payload) > MAX_PAYLOAD_BYTES:
-        raise ValueError(f"remote call exceeds the {MAX_PAYLOAD_BYTES}-byte payload limit")
+    if len(payload) > MAX_REMOTE_CALL_BYTES:
+        raise ValueError(
+            f"remote call exceeds the {MAX_REMOTE_CALL_BYTES}-byte total limit"
+        )
 
     from .grpc_transport import execute_remote_request
 
@@ -354,8 +356,10 @@ def _execute_payload(payload: bytes) -> tuple[dict[str, Any], bytes]:
         result_payload = cloudpickle.dumps(
             target(*args, **kwargs), protocol=cloudpickle.DEFAULT_PROTOCOL
         )
-        if len(result_payload) > MAX_PAYLOAD_BYTES:
-            raise ValueError(f"remote result exceeds the {MAX_PAYLOAD_BYTES}-byte payload limit")
+        if len(result_payload) > MAX_REMOTE_CALL_BYTES:
+            raise ValueError(
+                f"remote result exceeds the {MAX_REMOTE_CALL_BYTES}-byte total limit"
+            )
         return {"ok": True}, result_payload
     except Exception as exc:
         return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}, b""

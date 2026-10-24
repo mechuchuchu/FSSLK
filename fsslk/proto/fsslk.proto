@@ -79,12 +79,18 @@ message RemoteCallRequest {
   string token = 2;
   uint32 timeout_seconds = 3;
   bytes payload = 4;
+  uint32 chunk_index = 5;
+  uint32 chunk_count = 6;
+  uint64 total_size = 7;
 }
 
 message RemoteCallReply {
   bool ok = 1;
   string error = 2;
   bytes payload = 3;
+  uint32 chunk_index = 4;
+  uint32 chunk_count = 5;
+  uint64 total_size = 6;
 }
 
 service FSSLK {
@@ -93,5 +99,5 @@ service FSSLK {
   rpc Status(Empty) returns (RpcReply);
   rpc Sum(RpcRequest) returns (RpcReply);
   rpc Stage(StageRequest) returns (RpcReply);
-  rpc Execute(RemoteCallRequest) returns (RemoteCallReply);
+  rpc Execute(stream RemoteCallRequest) returns (stream RemoteCallReply);
 }

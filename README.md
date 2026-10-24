@@ -82,11 +82,12 @@ to that stage. Stage activations pass through the coordinator.
 
 This is a CPU prototype with two stages and two workers. It accepts one tensor
 input and only operations from the worker allowlist; the wire format currently
-supports CPU `int64` and `float32` tensors up to 64 MiB per tensor frame. Models
-must be in evaluation mode. Pipeline stage calls do not have application-level
-retry, and network transfer can cost much more than computation on slow or
-lossy links. The reported link measurements are captured before deployment and
-are not refreshed during each measured run.
+supports CPU `int64` and `float32` tensors up to 64 MiB per tensor frame by
+default. Set `FSSLK_MAX_PAYLOAD_BYTES` on all participants to change that frame
+size. Models must be in evaluation mode. Pipeline stage calls do not have
+application-level retry, and network transfer can cost much more than
+computation on slow or lossy links. The reported link measurements are
+captured before deployment and are not refreshed during each measured run.
 
 When stage B is slower than stage A, the coordinator writes queued A-to-B
 activation payloads to temporary files and keeps at most one activation waiting
@@ -94,8 +95,9 @@ in the handoff queue; stage A pauses while that queue is full. Temporary files
 are removed as stage B reads them and when a run exits. Set
 `FSSLK_ACTIVATION_SPOOL_DIR` to choose a mounted disk-backed directory instead
 of the system temporary directory. The active micro-batch and final model output
-still need memory, and one frame is still limited to 64 MiB; larger activations
-need chunked transfer and tile-aware operations.
+still need memory, and one frame is still limited to the configured payload
+size (64 MiB by default); larger activations need chunked transfer and
+tile-aware operations.
 
 ## Stage-level automatic differentiation
 
@@ -168,8 +170,12 @@ result = scale(torch.tensor([1.0, 2.0]))
 ```
 
 A class instance is created on the Worker for each call, so constructor and
-call arguments must be serializable. Remote callables and their results use
-cloudpickle and have a 64 MiB payload limit.
+call arguments must be serializable. Remote callables and results use
+cloudpickle. Their serialized bytes are sent in chunks of at most 64 MiB by
+default; the total limit defaults to 1 GiB. Set `FSSLK_MAX_PAYLOAD_BYTES` to
+change the chunk size and `FSSLK_MAX_REMOTE_CALL_BYTES` to change the total
+limit. Use the same settings on the client, Coordinator, and Workers. The
+receiver reassembles the full payload in memory before deserializing it.
 This API runs supplied Python code on Workers; use it only with trusted clients
 and a trusted network. gRPC traffic is not encrypted. Returned tensors are
 values and do not carry an autograd graph back to the client.
@@ -186,7 +192,11 @@ docker compose run --build --rm --no-deps \
 ## Prototype limits
 
 - This version uses CPU-only PyTorch; it does not require a GPU.
-- Tensor RPCs carry protobuf metadata and raw tensor bytes. The current codec supports CPU `int64` and `float32` tensors, with a 64 MiB maximum payload per request.
+- Tensor RPCs carry protobuf metadata and raw tensor bytes. The current codec
+  supports CPU `int64` and `float32` tensors, with a 64 MiB maximum payload per
+  frame by default (`FSSLK_MAX_PAYLOAD_BYTES`). Remote Python calls stream
+  larger serialized payloads in frames and use a configurable total limit
+  (`FSSLK_MAX_REMOTE_CALL_BYTES`, 1 GiB by default).
 - The legacy TCP transport uses a length-prefixed JSON header followed by raw tensor bytes. Coordinator, Worker, and CLI must use the same transport; gRPC and TCP cannot share one coordinator port.
 - `status` reports CPU sum throughput, rolling RTT and jitter, coordinator-to-worker transfer rate, UDP probe packet loss, and recent worker probe success. RTT probes run every 5 seconds; a 256 KiB bandwidth probe and 100-packet UDP loss probe run every 30 seconds.
 - Packet loss is measured on the UDP probe path and can differ from TCP data loss. The Compose setup publishes UDP port 27495; other deployments must allow the coordinator's UDP probe port.

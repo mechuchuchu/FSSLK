@@ -13,6 +13,8 @@ services:
     command: ["coordinator", "--host", "0.0.0.0", "--port", "27494", "--udp-port", "27495"]
     environment:
       FSSLK_DDP_TOKEN: ${FSSLK_DDP_TOKEN:-}
+      FSSLK_MAX_PAYLOAD_BYTES: "${FSSLK_MAX_PAYLOAD_BYTES:-67108864}"
+      FSSLK_MAX_REMOTE_CALL_BYTES: "${FSSLK_MAX_REMOTE_CALL_BYTES:-1073741824}"
     ports:
       - "27494:27494"
       - "27495:27495/udp"
@@ -20,6 +22,8 @@ services:
   worker-fast:
     <<: *worker-common
     environment:
+      FSSLK_MAX_PAYLOAD_BYTES: "${FSSLK_MAX_PAYLOAD_BYTES:-67108864}"
+      FSSLK_MAX_REMOTE_CALL_BYTES: "${FSSLK_MAX_REMOTE_CALL_BYTES:-1073741824}"
       FSSLK_NETEM_DELAY: "2ms"
       FSSLK_NETEM_RATE: "500mbit"
       FSSLK_NETEM_LOSS: "0%"
@@ -27,6 +31,8 @@ services:
   worker-medium:
     <<: *worker-common
     environment:
+      FSSLK_MAX_PAYLOAD_BYTES: "${FSSLK_MAX_PAYLOAD_BYTES:-67108864}"
+      FSSLK_MAX_REMOTE_CALL_BYTES: "${FSSLK_MAX_REMOTE_CALL_BYTES:-1073741824}"
       FSSLK_NETEM_DELAY: "25ms"
       FSSLK_NETEM_RATE: "50mbit"
       FSSLK_NETEM_LOSS: "1%"
@@ -34,6 +40,8 @@ services:
   worker-slow:
     <<: *worker-common
     environment:
+      FSSLK_MAX_PAYLOAD_BYTES: "${FSSLK_MAX_PAYLOAD_BYTES:-67108864}"
+      FSSLK_MAX_REMOTE_CALL_BYTES: "${FSSLK_MAX_REMOTE_CALL_BYTES:-1073741824}"
       FSSLK_NETEM_DELAY: "75ms"
       FSSLK_NETEM_RATE: "10mbit"
       FSSLK_NETEM_LOSS: "3%"
