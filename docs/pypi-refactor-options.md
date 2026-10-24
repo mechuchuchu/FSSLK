@@ -1,12 +1,14 @@
 # PyPI refactor options
 
-Research snapshot: 2026-10-24. This branch copies the current uncommitted
-`pipeline-exec` worktree. No replacement dependency has been installed or
-adopted yet. The project currently depends only on `torch>=2.2`.
+Research snapshot: 2026-10-24. This branch began from the `pipeline-exec`
+worktree. The first proposed spike, a gRPC worker transport, is implemented as
+the command-line default. The legacy TCP transport remains selectable for
+comparison. Runtime dependencies are PyTorch, `grpcio`, and protobuf;
+`grpcio-tools` is pinned in `requirements-dev.txt` for regenerating the stubs.
 
-The inspection environment has PyTorch 2.14.1+cpu and includes
-`torch.distributed.pipelining`; `grpcio`, Ray, `safetensors`, and DiskCache are
-not installed there.
+The inspection environment had PyTorch 2.14.1+cpu and includes
+`torch.distributed.pipelining`; Ray, `safetensors`, and DiskCache remain
+unadopted.
 
 ## Findings
 
@@ -53,10 +55,11 @@ not installed there.
 There is no single small library that preserves all current behavior while
 replacing every custom component.
 
-1. For an incremental refactor that keeps the network experiments, prototype
-   gRPC for the worker data and health-control APIs. Keep the network-aware
-   scheduler, stage runtime, and bounded activation spool. Compare code size,
-   throughput, and behavior under the existing latency/loss profiles.
+1. For an incremental refactor that keeps the network experiments, use the
+   implemented gRPC worker data and health APIs. The network-aware scheduler,
+   stage runtime, UDP link probes, retry policy, and bounded activation spool
+   remain custom. Compare code size, throughput, and behavior under the
+   existing latency/loss profiles before removing the TCP transport.
 2. For MNIST and distributed training, prototype
    `torch.distributed.pipelining` in a separate small example. Compare its
    microbatch outputs and gradients with the current stage runtime before
@@ -70,9 +73,13 @@ replacing every custom component.
 
 ## Proposed spikes
 
-- **gRPC spike:** implement `Status`, `StageDefine`, `StagePut`, `StageRun`,
-  `StageDrop`, and a long-lived health stream; preserve the existing stage
-  implementation and compare behavior under 0%, 1%, and 10% packet loss.
+- **gRPC spike:** `fsslk/proto/fsslk.proto` defines worker data and health
+  streams plus `Status`, `Sum`, and `Stage` RPCs for stage define, put, run,
+  and drop. The existing stage implementation is preserved. Behavior under
+  0%, 1%, and 10% packet loss still needs measurement.
+  Regenerate the checked-in Python stubs after editing the schema with:
+  `uv pip install -r requirements-dev.txt` and
+  `python -m grpc_tools.protoc -I. --python_out=. --grpc_python_out=. fsslk/proto/fsslk.proto`.
 - **PyTorch pipeline spike:** run the same two-stage model and microbatch count
   with `torch.distributed.pipelining` on two CPU worker processes; compare
   outputs, gradients, launch complexity, and whether the current topology's

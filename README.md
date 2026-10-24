@@ -1,6 +1,6 @@
 # FSSLK
 
-FSSLK is a prototype for coordinating CPU work across machines. This first version connects a coordinator to CPU workers over TCP, tracks worker heartbeats on a separate control connection, and distributes a small PyTorch tensor sum.
+FSSLK is a prototype for coordinating CPU work across machines. The command line uses gRPC for worker data and health streams, status, tensor sums, and pipeline stage calls. The previous length-prefixed TCP transport remains available with `--transport tcp`. gRPC currently uses insecure channels, so deploy it only on a trusted network.
 
 ## Run with Docker Compose
 
@@ -19,8 +19,8 @@ docker compose exec coordinator python -m fsslk status --host coordinator
 Worker status reports `healthy`, `suspect`, or `unreachable` from its
 acknowledged control-channel heartbeat. With the default 2-second heartbeat
 interval and 15-second lease, a worker becomes suspect after 7.5 seconds without
-a heartbeat and unreachable after 15 seconds. Stage data continues over the
-separate data connection.
+a heartbeat and unreachable after 15 seconds. Stage data and health use
+separate gRPC streams.
 
 Split a CPU tensor across the workers and add the partial sums:
 
@@ -56,6 +56,16 @@ docker compose exec -T coordinator python -m fsslk run-pipeline \
   --workers "$FAST,$MED" --repeats 3 --json /tmp/run_m1.json
 docker compose exec -T coordinator python -m fsslk run-pipeline \
   --workers "$FAST,$MED" --microbatches 4 --repeats 3 --json /tmp/run_m4.json
+```
+
+For a single forward pass without timing output, use `run-inference`. It returns
+the final model output values; intermediate activations stay inside the
+coordinator pipeline. Pass `--json` to write those values to a file:
+
+```bash
+docker compose exec -T coordinator python -m fsslk run-inference \
+  --workers "$FAST,$MED" --layers 1 --dim 16 --heads 4 --batch 1 --seq 8 \
+  --json /tmp/output.json
 ```
 
 Copy the JSON results to the host if needed:
@@ -101,7 +111,68 @@ This is only a local stage primitive. The distributed pipeline still runs in
 evaluation mode; there is no network backward command, loss calculation,
 optimizer update, gradient aggregation, or MNIST training loop yet.
 
-The worker retries its connection while the coordinator starts. For a local non-Docker run, start `python -m fsslk coordinator`, then start one or more `python -m fsslk worker --host 127.0.0.1` processes in separate terminals. Use `python -m fsslk status` and `python -m fsslk run-sum --size 16` from another terminal.
+Workers retry their gRPC data stream while the coordinator starts and reconnect
+their acknowledged health stream independently. For a local non-Docker run,
+start `python -m fsslk coordinator`, then start one or more
+`python -m fsslk worker --host 127.0.0.1` processes in separate terminals. Use
+`python -m fsslk status` and `python -m fsslk run-sum --size 16` from another
+terminal. Add `--transport tcp` to all participants to use the previous
+transport instead.
+
+## Remote PyTorch callables
+
+`fsslk.fsslk_ddp` wraps a function or callable class. Without `axis`, each
+invocation runs on one healthy Worker; calls are assigned round-robin unless
+you select a `worker`. With `axis=0`, the first positional tensor is split
+into up to four chunks per healthy Worker. Chunk dispatch order is shuffled;
+each Worker gets another chunk as soon as it finishes its current one. Results
+are reassembled in the original axis order and concatenated. Choose this only
+when the operation is independent across that axis. Use `merge="sum"` for
+operations that return partial sums.
+Configure the same token in the Coordinator and client environments before
+using this API:
+
+```bash
+export FSSLK_DDP_TOKEN='use-a-long-random-value'
+python -m fsslk coordinator
+```
+
+Start one or more Workers as usual. Then call a wrapped function from a client
+process that has `FSSLK_DDP_TOKEN` set:
+
+```python
+import torch
+import fsslk
+
+@fsslk.fsslk_ddp(axis=0)
+def relu(values):
+    return torch.relu(values)
+
+result = relu(torch.tensor([-1.0, 2.0]))
+```
+
+Callable classes can be decorated as well:
+
+```python
+@fsslk.fsslk_ddp(axis=0)
+class Scale(torch.nn.Module):
+    def __init__(self, factor):
+        super().__init__()
+        self.factor = factor
+
+    def forward(self, values):
+        return values * self.factor
+
+scale = Scale(3)
+result = scale(torch.tensor([1.0, 2.0]))
+```
+
+A class instance is created on the Worker for each call, so constructor and
+call arguments must be serializable. Remote callables and their results use
+cloudpickle and have a 64 MiB payload limit.
+This API runs supplied Python code on Workers; use it only with trusted clients
+and a trusted network. gRPC traffic is not encrypted. Returned tensors are
+values and do not carry an autograd graph back to the client.
 
 ## Run regression tests
 
@@ -115,12 +186,12 @@ docker compose run --build --rm --no-deps \
 ## Prototype limits
 
 - This version uses CPU-only PyTorch; it does not require a GPU.
-- Tensor frames use a length-prefixed JSON header followed by raw tensor bytes. The current codec supports CPU `int64` and `float32` tensors, with a 64 MiB maximum payload per frame.
-- Coordinator, Worker, and CLI must use the same version; this frame format is not compatible with the previous newline-delimited JSON protocol.
-- `status` reports CPU sum throughput, rolling RTT and jitter, coordinator-to-worker transfer rate, UDP probe packet loss, and recent TCP probe success. RTT probes run every 5 seconds; a 256 KiB bandwidth probe and 100-packet UDP loss probe run every 30 seconds.
+- Tensor RPCs carry protobuf metadata and raw tensor bytes. The current codec supports CPU `int64` and `float32` tensors, with a 64 MiB maximum payload per request.
+- The legacy TCP transport uses a length-prefixed JSON header followed by raw tensor bytes. Coordinator, Worker, and CLI must use the same transport; gRPC and TCP cannot share one coordinator port.
+- `status` reports CPU sum throughput, rolling RTT and jitter, coordinator-to-worker transfer rate, UDP probe packet loss, and recent worker probe success. RTT probes run every 5 seconds; a 256 KiB bandwidth probe and 100-packet UDP loss probe run every 30 seconds.
 - Packet loss is measured on the UDP probe path and can differ from TCP data loss. The Compose setup publishes UDP port 27495; other deployments must allow the coordinator's UDP probe port.
 - Compose applies different Linux `netem` profiles to the Workers: fast uses 2 ms / 500 Mbps / 0% loss, medium 25 ms / 50 Mbps / 1%, and slow 75 ms / 10 Mbps / 3%. Each profile is applied in both traffic directions.
 - Work chunks use a deterministic completion-time heuristic combining CPU sum throughput, measured transfer rate, UDP probe loss, and RTT. It does not use reinforcement learning; missing network measurements fall back to compute-only weighting.
 - If a worker disconnects, fails a sum task, or does not respond within 30 seconds, the coordinator retries that chunk on another active worker. A chunk gets at most three attempts, and a late response from an earlier attempt is ignored.
 - Retries currently apply only to the prototype's stateless `sum` operation. If no other active worker is available, the request fails.
-- Authentication and encryption are not implemented yet.
+- `FSSLK_DDP_TOKEN` guards remote callable execution. Other coordinator APIs are unauthenticated, and gRPC traffic is plaintext.

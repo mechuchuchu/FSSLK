@@ -1,0 +1,97 @@
+syntax = "proto3";
+
+package fsslk.transport.v1;
+
+message Empty {}
+
+message WorkerRegistration {
+  string node_id = 1;
+  uint32 cpu_count = 2;
+  string device = 3;
+  double compute_elements_per_second = 4;
+  double heartbeat_interval = 5;
+}
+
+message WorkerRegistered {
+  string node_id = 1;
+  bytes udp_probe_token = 2;
+  uint32 udp_port = 3;
+  string control_token = 4;
+}
+
+message WorkerReply {
+  string type = 1;
+  string task_id = 2;
+  string metadata_json = 3;
+  bytes payload = 4;
+}
+
+message WorkerCommand {
+  string type = 1;
+  string task_id = 2;
+  string metadata_json = 3;
+  bytes payload = 4;
+}
+
+message WorkerEvent {
+  oneof event {
+    WorkerRegistration registration = 1;
+    WorkerReply reply = 2;
+  }
+}
+
+message CoordinatorEvent {
+  oneof event {
+    WorkerRegistered registered = 1;
+    WorkerCommand command = 2;
+  }
+}
+
+message WorkerHeartbeat {
+  string node_id = 1;
+  string control_token = 2;
+  uint64 sequence = 3;
+}
+
+message HeartbeatAck {
+  uint64 sequence = 1;
+}
+
+message RpcRequest {
+  string metadata_json = 1;
+  bytes payload = 2;
+}
+
+message RpcReply {
+  string metadata_json = 1;
+  bytes payload = 2;
+}
+
+message StageRequest {
+  string worker_id = 1;
+  string command = 2;
+  string metadata_json = 3;
+  bytes payload = 4;
+}
+
+message RemoteCallRequest {
+  string worker_id = 1;
+  string token = 2;
+  uint32 timeout_seconds = 3;
+  bytes payload = 4;
+}
+
+message RemoteCallReply {
+  bool ok = 1;
+  string error = 2;
+  bytes payload = 3;
+}
+
+service FSSLK {
+  rpc WorkerSession(stream WorkerEvent) returns (stream CoordinatorEvent);
+  rpc WorkerHealth(stream WorkerHeartbeat) returns (stream HeartbeatAck);
+  rpc Status(Empty) returns (RpcReply);
+  rpc Sum(RpcRequest) returns (RpcReply);
+  rpc Stage(StageRequest) returns (RpcReply);
+  rpc Execute(RemoteCallRequest) returns (RemoteCallReply);
+}

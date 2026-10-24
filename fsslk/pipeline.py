@@ -39,6 +39,10 @@ class PipelineError(RuntimeError):
     """The pipeline could not be set up or a worker call failed."""
 
 
+def _transport_kwargs(transport: str) -> dict[str, str]:
+    return {} if transport == "tcp" else {"transport": transport}
+
+
 # ------------------------------------------------------------------ coordinator
 def request(
     host: str,
@@ -46,8 +50,15 @@ def request(
     message: dict[str, Any],
     payload: bytes = b"",
     timeout: float = 900,
+    transport: str = "tcp",
 ) -> tuple[dict[str, Any], bytes]:
     """One client request to the coordinator; the reply may carry a payload."""
+    if transport == "grpc":
+        from .grpc_transport import grpc_request
+
+        return grpc_request(host, port, message, payload, timeout)
+    if transport != "tcp":
+        raise ValueError(f"unsupported coordinator transport: {transport!r}")
     with socket.create_connection((host, port), timeout=10) as conn:
         conn.settimeout(timeout)
         stream = conn.makefile("rb")
@@ -68,9 +79,14 @@ def call_worker(
     command: str,
     fields: dict[str, Any] | None = None,
     payload: bytes = b"",
+    transport: str = "tcp",
 ) -> tuple[dict[str, Any], bytes]:
     response, reply_payload = request(
-        host, port, {"command": command, "worker": worker, **(fields or {})}, payload
+        host,
+        port,
+        {"command": command, "worker": worker, **(fields or {})},
+        payload,
+        **_transport_kwargs(transport),
     )
     if not response.get("ok"):
         raise PipelineError(f"{worker}: {command} failed: {response.get('error', 'unknown error')}")
@@ -78,12 +94,22 @@ def call_worker(
 
 
 def wait_for_workers(
-    host: str, port: int, workers: list[str], timeout: float = 90
+    host: str,
+    port: int,
+    workers: list[str],
+    timeout: float = 90,
+    transport: str = "tcp",
 ) -> dict[str, dict[str, Any]]:
     """Wait until every worker is registered and the coordinator has measured its link."""
     deadline = time.monotonic() + timeout
     while True:
-        response, _ = request(host, port, {"command": "status"}, timeout=15)
+        response, _ = request(
+            host,
+            port,
+            {"command": "status"},
+            timeout=15,
+            **_transport_kwargs(transport),
+        )
         nodes = {node["node_id"]: node for node in response.get("nodes", [])}
         ready = all(
             name in nodes
@@ -104,39 +130,71 @@ def wait_for_workers(
 
 # --------------------------------------------------------------------- the work
 def deploy_stage(
-    host: str, port: int, worker: str, spec: StageSpec, weights: dict[str, torch.Tensor]
+    host: str,
+    port: int,
+    worker: str,
+    spec: StageSpec,
+    weights: dict[str, torch.Tensor],
+    transport: str = "tcp",
 ) -> float:
     """Send a stage's operations and weights once; return the seconds it took."""
     started_at = time.perf_counter()
     call_worker(
-        host, port, worker, "stage_define", {"stage_id": spec.stage_id},
+        host,
+        port,
+        worker,
+        "stage_define",
+        {"stage_id": spec.stage_id},
         json.dumps(spec.to_dict(), separators=(",", ":")).encode("utf-8"),
+        **_transport_kwargs(transport),
     )
     for bundle in split_bundles(weights):
         meta, payload = encode_bundle(bundle)
         call_worker(
-            host, port, worker, "stage_put", {"stage_id": spec.stage_id, "tensors": meta}, payload
+            host,
+            port,
+            worker,
+            "stage_put",
+            {"stage_id": spec.stage_id, "tensors": meta},
+            payload,
+            **_transport_kwargs(transport),
         )
     return time.perf_counter() - started_at
 
 
 def run_stage(
-    host: str, port: int, worker: str, stage_id: str, inputs: dict[str, torch.Tensor]
+    host: str,
+    port: int,
+    worker: str,
+    stage_id: str,
+    inputs: dict[str, torch.Tensor],
+    transport: str = "tcp",
 ) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
     output_meta, output_payload, record = run_stage_payload(
-        host, port, worker, stage_id, inputs
+        host, port, worker, stage_id, inputs, **_transport_kwargs(transport)
     )
     return decode_bundle(output_meta, output_payload), record
 
 
 def run_stage_payload(
-    host: str, port: int, worker: str, stage_id: str, inputs: dict[str, torch.Tensor]
+    host: str,
+    port: int,
+    worker: str,
+    stage_id: str,
+    inputs: dict[str, torch.Tensor],
+    transport: str = "tcp",
 ) -> tuple[list[dict[str, Any]], bytes, dict[str, Any]]:
     """Run a stage and return its encoded output without materializing tensors."""
     meta, payload = encode_bundle(inputs)
     started_at = time.perf_counter()
     response, reply_payload = call_worker(
-        host, port, worker, "stage_run", {"stage_id": stage_id, "tensors": meta}, payload
+        host,
+        port,
+        worker,
+        "stage_run",
+        {"stage_id": stage_id, "tensors": meta},
+        payload,
+        **_transport_kwargs(transport),
     )
     wall = time.perf_counter() - started_at
     output_meta = response.get("tensors")
@@ -165,7 +223,7 @@ class PipelineResult:
     local_seconds: dict[str, float]
     estimate_seconds: float | None
     links: dict[str, dict[str, Any]]
-    max_abs_diff: float
+    max_abs_diff: float | None
     output: Any = field(repr=False, default=None)
 
     @property
@@ -233,6 +291,7 @@ def _run_once(
     chunks: list[torch.Tensor],
     input_name: str,
     output_names: list[str],
+    transport: str = "tcp",
 ) -> tuple[list[torch.Tensor], list[dict[str, Any]], float]:
     """Stream every micro-batch through both stages; stage A and B overlap."""
     spec_a, spec_b = specs
@@ -262,7 +321,12 @@ def _run_once(
                         break
                     feed = {item.name: chunk for item in spec_a.inputs}
                     metadata, payload, record = run_stage_payload(
-                        host, port, workers[0], spec_a.stage_id, feed
+                        host,
+                        port,
+                        workers[0],
+                        spec_a.stage_id,
+                        feed,
+                        **_transport_kwargs(transport),
                     )
                     calls.append({"stage": "A", "microbatch": index, **record})
                     activation = spool.write(metadata, payload)
@@ -284,7 +348,14 @@ def _run_once(
                         spec.name: middle[spec.name] if spec.name in middle else chunks[index]
                         for spec in spec_b.inputs
                     }
-                    outputs, record = run_stage(host, port, workers[1], spec_b.stage_id, feed)
+                    outputs, record = run_stage(
+                        host,
+                        port,
+                        workers[1],
+                        spec_b.stage_id,
+                        feed,
+                        **_transport_kwargs(transport),
+                    )
                     calls.append({"stage": "B", "microbatch": index, **record})
                     results[index] = outputs
                     del feed, middle
@@ -336,6 +407,8 @@ def run_pipeline(
     min_share: float = 0.2,
     repeats: int = 3,
     log: Callable[[str], None] = print,
+    transport: str = "tcp",
+    benchmark: bool = True,
 ) -> PipelineResult:
     if model.training:
         raise PipelineError("put the model in eval mode (model.eval()) before running a pipeline")
@@ -365,46 +438,79 @@ def run_pipeline(
     )
 
     log("waiting for the coordinator to measure both workers ...")
-    status = wait_for_workers(host, port, list(workers))
+    status = wait_for_workers(
+        host, port, list(workers), **_transport_kwargs(transport)
+    )
 
-    log("local baseline ...")
-    with torch.no_grad():
-        expected = model(example_input)
-    expected_list = [expected] if isinstance(expected, torch.Tensor) else list(expected)
-    local = {"1 thread": _time_local(model, example_input, 1)}
-    default_threads = torch.get_num_threads()
-    if default_threads > 1:
-        local[f"{default_threads} threads"] = _time_local(model, example_input, default_threads)
+    expected_list: list[torch.Tensor] | None = None
+    local: dict[str, float] = {}
+    if benchmark:
+        log("local baseline ...")
+        with torch.no_grad():
+            expected = model(example_input)
+        expected_list = [expected] if isinstance(expected, torch.Tensor) else list(expected)
+        local["1 thread"] = _time_local(model, example_input, 1)
+        default_threads = torch.get_num_threads()
+        if default_threads > 1:
+            local[f"{default_threads} threads"] = _time_local(
+                model, example_input, default_threads
+            )
 
     try:
         log(f"deploying stages (cut after {cut_name}) ...")
         with ThreadPoolExecutor(max_workers=2) as pool:
             deploys = [
-                pool.submit(deploy_stage, host, port, workers[i], specs[i], weights[i])
+                pool.submit(
+                    deploy_stage,
+                    host,
+                    port,
+                    workers[i],
+                    specs[i],
+                    weights[i],
+                    **_transport_kwargs(transport),
+                )
                 for i in range(2)
             ]
             deploy_seconds = tuple(future.result() for future in deploys)
 
         output_names = graph.output_names()
-        log("warm-up run ...")
-        _run_once(host, port, workers, specs, chunks, input_nodes[0], output_names)
-        runs = []
-        for number in range(repeats):
-            log(f"measured run {number + 1}/{repeats} ...")
-            runs.append(_run_once(host, port, workers, specs, chunks, input_nodes[0], output_names))
+        if benchmark:
+            log("warm-up run ...")
+            _run_once(host, port, workers, specs, chunks, input_nodes[0], output_names, transport)
+            runs = []
+            for number in range(repeats):
+                log(f"measured run {number + 1}/{repeats} ...")
+                runs.append(
+                    _run_once(
+                        host, port, workers, specs, chunks, input_nodes[0], output_names, transport
+                    )
+                )
+        else:
+            runs = [
+                _run_once(host, port, workers, specs, chunks, input_nodes[0], output_names, transport)
+            ]
     finally:
         for index in range(2):
             try:
-                call_worker(host, port, workers[index], "stage_drop", {"stage_id": specs[index].stage_id})
+                call_worker(
+                    host,
+                    port,
+                    workers[index],
+                    "stage_drop",
+                    {"stage_id": specs[index].stage_id},
+                    **_transport_kwargs(transport),
+                )
             except (PipelineError, OSError):
                 pass
 
     times = [elapsed for _, _, elapsed in runs]
     outputs, calls, _ = min(runs, key=lambda run: abs(run[2] - statistics.median(times)))
-    if len(outputs) != len(expected_list):
+    if expected_list is not None and len(outputs) != len(expected_list):
         raise PipelineError("pipeline returned a different number of outputs than the model")
-    max_abs_diff = max(
-        (got - want).abs().max().item() for got, want in zip(outputs, expected_list)
+    max_abs_diff = (
+        max((got - want).abs().max().item() for got, want in zip(outputs, expected_list))
+        if expected_list is not None
+        else None
     )
 
     links = {name: status[name] for name in workers}
@@ -421,12 +527,45 @@ def run_pipeline(
         run_seconds=times,
         calls=calls,
         local_seconds=local,
-        estimate_seconds=_estimate(graph, specs, links, calls, local["1 thread"], microbatches),
+        estimate_seconds=(
+            _estimate(graph, specs, links, calls, local["1 thread"], microbatches)
+            if benchmark
+            else None
+        ),
         links=links,
         max_abs_diff=max_abs_diff,
         output=outputs[0] if len(outputs) == 1 else tuple(outputs),
     )
     return result
+
+
+def run_inference(
+    model: nn.Module,
+    example_input: torch.Tensor,
+    *,
+    host: str = "127.0.0.1",
+    port: int = 27494,
+    workers: tuple[str, str] = ("worker-fast", "worker-medium"),
+    cut: str | None = None,
+    microbatches: int = 1,
+    min_share: float = 0.2,
+    transport: str = "grpc",
+) -> Any:
+    """Run one distributed forward pass and return only the final output value(s)."""
+    return run_pipeline(
+        model,
+        example_input,
+        host=host,
+        port=port,
+        workers=workers,
+        cut=cut,
+        microbatches=microbatches,
+        min_share=min_share,
+        repeats=1,
+        log=lambda _message: None,
+        transport=transport,
+        benchmark=False,
+    ).output
 
 
 def _estimate(
@@ -504,7 +643,8 @@ def format_report(result: PipelineResult) -> str:
             f"{call['stage']}      {call['microbatch']:<3}  {call['wall']:5.2f}  {call['compute']:7.2f}  "
             f"{call['wall'] - call['compute']:5.2f}   {_fmt_bytes(call['sent_bytes']):>9}  {_fmt_bytes(call['received_bytes']):>9}"
         )
-    lines += ["", f"max |pipeline - local| = {result.max_abs_diff:.3e}"]
+    difference = f"{result.max_abs_diff:.3e}" if result.max_abs_diff is not None else "not measured"
+    lines += ["", f"max |pipeline - local| = {difference}"]
     return "\n".join(lines)
 
 
@@ -512,6 +652,7 @@ def format_report(result: PipelineResult) -> str:
 def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=27494)
+    parser.add_argument("--transport", choices=("grpc", "tcp"), default="grpc")
     parser.add_argument(
         "--workers", default="worker-fast,worker-medium",
         help="two node ids, stage A first (default: %(default)s)",
@@ -526,7 +667,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--seq", type=int, default=256)
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--json", help="also write the measurements to this file")
+    parser.add_argument("--json", help="also write results or output values to this file")
 
 
 def main(args: argparse.Namespace) -> None:
@@ -538,10 +679,31 @@ def main(args: argparse.Namespace) -> None:
     torch.manual_seed(args.seed)
     model = build_model(args.layers, args.dim, args.heads)
     example = torch.randn(args.batch, args.seq, args.dim)
+    if getattr(args, "command", "run-pipeline") == "run-inference":
+        outputs = run_inference(
+            model,
+            example,
+            host=args.host,
+            port=args.port,
+            workers=workers,  # type: ignore[arg-type]
+            cut=args.cut,
+            microbatches=args.microbatches,
+            min_share=args.min_share,
+            transport=args.transport,
+        )
+        values = _output_values(outputs)
+        if args.json:
+            with open(args.json, "w", encoding="utf-8") as handle:
+                json.dump(values, handle)
+        else:
+            print(json.dumps(values))
+        return
+
     result = run_pipeline(
         model, example, host=args.host, port=args.port, workers=workers,  # type: ignore[arg-type]
         cut=args.cut, microbatches=args.microbatches, min_share=args.min_share,
         repeats=args.repeats, log=lambda text: print(text, flush=True),
+        transport=args.transport,
     )
     print()
     print(format_report(result))
@@ -549,3 +711,11 @@ def main(args: argparse.Namespace) -> None:
         with open(args.json, "w", encoding="utf-8") as handle:
             json.dump(result.to_dict(), handle, indent=1)
         print(f"\nmeasurements written to {args.json}")
+
+
+def _output_values(value: Any) -> Any:
+    if isinstance(value, torch.Tensor):
+        return value.tolist()
+    if isinstance(value, (tuple, list)):
+        return [_output_values(item) for item in value]
+    return value
