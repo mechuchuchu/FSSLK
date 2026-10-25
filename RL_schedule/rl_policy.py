@@ -16,13 +16,14 @@ from torch.nn import functional as F
 
 from .evaluate import run_episode
 from .scenarios import evaluation_workers, training_workers
-from .simulator import SchedulingEnv, WorkerSpec
+from .simulator import SchedulingEnv, SimulationConfig, WorkerSpec
 
 
 @dataclass(frozen=True)
 class PPOConfig:
     episodes: int = 1000
     rollout_episodes: int = 16
+    worker_count: int = 3
     history_length: int = 4
     hidden_size: int = 128
     seed: int = 0
@@ -36,8 +37,8 @@ class PPOConfig:
     minibatch_size: int = 128
 
     def validate(self) -> None:
-        if self.episodes < 1 or self.rollout_episodes < 1:
-            raise ValueError("episode counts must be at least 1")
+        if self.episodes < 1 or self.rollout_episodes < 1 or self.worker_count < 1:
+            raise ValueError("episode counts and worker_count must be at least 1")
         if self.history_length < 1 or self.hidden_size < 1:
             raise ValueError("history length and hidden size must be at least 1")
         if self.learning_rate <= 0:
@@ -213,25 +214,84 @@ def _update_policy(
     }
 
 
-def train_policy(config: PPOConfig, output: Path) -> dict[str, Any]:
+def train_policy(
+    config: PPOConfig,
+    output: Path,
+    resume_checkpoint: Path | None = None,
+) -> dict[str, Any]:
     config.validate()
     torch.manual_seed(config.seed)
-    prototype_env = SchedulingEnv(history_length=config.history_length)
+    prototype_env = SchedulingEnv(
+        workers=evaluation_workers("seen", config.worker_count),
+        history_length=config.history_length,
+    )
     policy = PolicyValueNetwork(
         prototype_env.observation_size,
         prototype_env.action_count,
         config.hidden_size,
     )
-    optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
-    update_reports: list[dict[str, float | int]] = []
-    episode = 0
+    starting_episode = 0
+    resumed_checkpoint: dict[str, Any] | None = None
+    if resume_checkpoint is not None:
+        resumed_checkpoint = torch.load(
+            resume_checkpoint, map_location="cpu", weights_only=True
+        )
+        expected = {
+            "history_length": config.history_length,
+            "worker_count": config.worker_count,
+            "hidden_size": config.hidden_size,
+            "observation_size": prototype_env.observation_size,
+            "action_count": prototype_env.action_count,
+        }
+        actual = {
+            "history_length": int(resumed_checkpoint["history_length"]),
+            "worker_count": int(
+                resumed_checkpoint.get(
+                    "worker_count",
+                    int(resumed_checkpoint["action_count"])
+                    - len(SimulationConfig().wait_seconds),
+                )
+            ),
+            "hidden_size": int(resumed_checkpoint["hidden_size"]),
+            "observation_size": int(resumed_checkpoint["observation_size"]),
+            "action_count": int(resumed_checkpoint["action_count"]),
+        }
+        if actual != expected:
+            raise ValueError(
+                f"resume checkpoint dimensions/configuration {actual} do not match {expected}"
+            )
+        policy.load_state_dict(resumed_checkpoint["state_dict"])
+        previous_config = resumed_checkpoint.get("training_config", {})
+        starting_episode = int(
+            resumed_checkpoint.get(
+                "episodes_completed", previous_config.get("episodes", 0)
+            )
+        )
+        if starting_episode < 0:
+            raise ValueError("resume checkpoint has an invalid completed episode count")
 
-    while episode < config.episodes:
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
+    optimizer_state_restored = False
+    if resumed_checkpoint is not None:
+        if "optimizer_state_dict" in resumed_checkpoint:
+            optimizer.load_state_dict(resumed_checkpoint["optimizer_state_dict"])
+            optimizer_state_restored = True
+        if "torch_rng_state" in resumed_checkpoint:
+            torch.set_rng_state(resumed_checkpoint["torch_rng_state"])
+        else:
+            torch.manual_seed(config.seed + starting_episode)
+    update_reports: list[dict[str, float | int]] = []
+    episode = starting_episode
+    target_episode = starting_episode + config.episodes
+
+    while episode < target_episode:
         batch_trajectories: list[dict[str, Any]] = []
         batch_metrics: list[dict[str, Any]] = []
-        batch_count = min(config.rollout_episodes, config.episodes - episode)
+        batch_count = min(config.rollout_episodes, target_episode - episode)
         for _ in range(batch_count):
-            workers = training_workers(config.seed + episode * 7919)
+            workers = training_workers(
+                config.seed + episode * 7919, config.worker_count
+            )
             trajectory, metrics = _collect_episode(
                 policy,
                 workers,
@@ -268,10 +328,14 @@ def train_policy(config: PPOConfig, output: Path) -> dict[str, Any]:
         {
             "format": "rl-schedule-ppo-v1",
             "history_length": config.history_length,
+            "worker_count": config.worker_count,
             "hidden_size": config.hidden_size,
             "observation_size": prototype_env.observation_size,
             "action_count": prototype_env.action_count,
+            "episodes_completed": episode,
             "state_dict": policy.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "torch_rng_state": torch.get_rng_state(),
             "training_config": asdict(config),
         },
         output,
@@ -281,11 +345,16 @@ def train_policy(config: PPOConfig, output: Path) -> dict[str, Any]:
         "algorithm": "PPO",
         "policy_type": "instantaneous" if config.history_length == 1 else "history_aware",
         "training_config": asdict(config),
+        "starting_episodes": starting_episode,
+        "episodes_trained": config.episodes,
+        "episodes_completed_total": episode,
+        "resumed_from": str(resume_checkpoint) if resume_checkpoint is not None else None,
+        "optimizer_state_restored": optimizer_state_restored,
         "updates": update_reports,
     }
 
 
-def _load_policy(checkpoint_path: Path) -> tuple[PolicyValueNetwork, int]:
+def _load_policy(checkpoint_path: Path) -> tuple[PolicyValueNetwork, int, int]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     policy = PolicyValueNetwork(
         int(checkpoint["observation_size"]),
@@ -294,7 +363,14 @@ def _load_policy(checkpoint_path: Path) -> tuple[PolicyValueNetwork, int]:
     )
     policy.load_state_dict(checkpoint["state_dict"])
     policy.eval()
-    return policy, int(checkpoint["history_length"])
+    worker_count = int(
+        checkpoint.get(
+            "worker_count",
+            int(checkpoint["action_count"])
+            - len(SimulationConfig().wait_seconds),
+        )
+    )
+    return policy, int(checkpoint["history_length"]), worker_count
 
 
 def _run_policy_episode(
@@ -361,10 +437,10 @@ def evaluate_checkpoint(
 ) -> dict[str, Any]:
     if episodes < 1:
         raise ValueError("episodes must be at least 1")
-    policy, history_length = _load_policy(checkpoint_path)
+    policy, history_length, worker_count = _load_policy(checkpoint_path)
     reports: dict[str, Any] = {}
     for condition in ("seen", "unseen"):
-        workers = evaluation_workers(condition)
+        workers = evaluation_workers(condition, worker_count)
         policy_runs = [
             _run_policy_episode(
                 policy,
@@ -413,10 +489,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     train_parser = commands.add_parser("train", help="train a PPO scheduler")
     train_parser.add_argument("--episodes", type=int, default=1000)
     train_parser.add_argument("--rollout-episodes", type=int, default=16)
+    train_parser.add_argument("--worker-count", type=int, default=3)
     train_parser.add_argument("--history-length", type=int, default=4)
     train_parser.add_argument("--hidden-size", type=int, default=128)
     train_parser.add_argument("--seed", type=int, default=0)
     train_parser.add_argument("--output", type=Path, required=True)
+    train_parser.add_argument(
+        "--resume-checkpoint",
+        type=Path,
+        help="continue training from a compatible PPO checkpoint",
+    )
     train_parser.add_argument("--metrics", type=Path)
     train_parser.add_argument("--eval-episodes", type=int, default=100)
 
@@ -437,11 +519,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         config = PPOConfig(
             episodes=args.episodes,
             rollout_episodes=args.rollout_episodes,
+            worker_count=args.worker_count,
             history_length=args.history_length,
             hidden_size=args.hidden_size,
             seed=args.seed,
         )
-        result = train_policy(config, args.output)
+        result = train_policy(config, args.output, args.resume_checkpoint)
         if args.eval_episodes > 0:
             result["evaluation"] = evaluate_checkpoint(
                 args.output,

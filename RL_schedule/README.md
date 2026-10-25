@@ -75,6 +75,12 @@ python -m RL_schedule.rl_policy train \
   --history-length 1 --output RL_schedule/results/ppo-instant.pt --eval-episodes 50
 python -m RL_schedule.rl_policy train \
   --history-length 4 --output RL_schedule/results/ppo-history.pt --eval-episodes 50
+python -m RL_schedule.rl_policy train \
+  --worker-count 6 --history-length 4 \
+  --output RL_schedule/results/ppo-history-6w.pt --eval-episodes 50
+python -m RL_schedule.rl_policy train \
+  --episodes 4000 --resume-checkpoint RL_schedule/results/ppo-history.pt \
+  --output RL_schedule/results/ppo-history-5k.pt --eval-episodes 100
 python -m RL_schedule.rl_policy compare \
   --instantaneous RL_schedule/results/ppo-instant.pt \
   --history-aware RL_schedule/results/ppo-history.pt --episodes 100
@@ -84,6 +90,16 @@ The policy observes only simulator telemetry. It chooses between short,
 medium, or long waits and duplicating the current shard on an available worker.
 The reward charges elapsed time, network work, duplicate compute, and failed
 episodes, while evaluation reports makespan and resource costs separately.
+`--worker-count` selects the fleet size for training and evaluation; each
+checkpoint is tied to that count because its observation and action dimensions
+depend on the worker list. The current simulator scales the scheduling choices
+for one delayed shard, so this option compares policy behavior across fleet
+sizes and does not measure multi-shard training throughput.
+For counts above three, extra simulator profiles are seeded variations of the
+fast, medium, and slow templates; they do not represent additional measured
+Docker workers.
+`--resume-checkpoint` continues from a compatible policy. Checkpoints that do
+not contain optimizer state resume with a freshly initialized Adam optimizer.
 
 ## Step 5: schedule real worker tasks
 
