@@ -1,0 +1,57 @@
+{
+  "scheduler": "ppo",
+  "run_id": "a3540ecb9229473dabe2f8f6fd2ebf1a",
+  "policy_checkpoint": "/results/ppo-lstm-5k.pt",
+  "config": {
+    "samples": 16384,
+    "input_dim": 32,
+    "hidden_dim": 4096,
+    "output_dim": 16,
+    "dataset_seed": 0,
+    "model_seed": 1,
+    "learning_rate": 0.003,
+    "target_loss": 0.01
+  },
+  "workers": [
+    "http://worker-fast:27500",
+    "http://worker-medium:27500",
+    "http://worker-slow:27500"
+  ],
+  "shard_count": 3,
+  "steps_completed": 1,
+  "final_train_loss": 7.395050525665283,
+  "target_reached": false,
+  "target_loss_step": null,
+  "elapsed_seconds": 9.402162534000126,
+  "final_model_sha256": "43726de431ae24da13f34d7b2056f696142bb0d2cbd12ae9581a113c7b52c142",
+  "step_metrics": [
+    {
+      "model_version": 0,
+      "makespan_seconds": 7.0348357490001945,
+      "gradient_aggregation_seconds": 0.0034195709995401558,
+      "shard_count": 3,
+      "shard_sizes": [
+        5462,
+        5461,
+        5461
+      ],
+      "attempts": 4,
+      "duplicates_started": 1,
+      "wait_actions": 1,
+      "duplicate_actions": 1,
+      "late_results_ignored": 1,
+      "pending_worker_cancellations": 0,
+      "invalid_results_rejected": 0,
+      "invalid_responses": 0,
+      "stale_results_rejected": 0,
+      "duplicate_results_ignored": 1,
+      "weighted_pre_update_loss": 1.056143337900721,
+      "reference_gradient_max_abs_error": 1.1175870895385742e-08,
+      "reference_gradient_l2_error": 2.710582878669736e-07,
+      "reference_loss_difference": 5.405672687253116e-08,
+      "remote_pre_update_loss": 1.056143337900721,
+      "local_loss_after_update": 7.395050525665283,
+      "step": 1
+    }
+  ]
+}

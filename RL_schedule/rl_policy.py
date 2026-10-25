@@ -559,6 +559,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     train_parser.add_argument("--episodes", type=int, default=1000)
     train_parser.add_argument("--rollout-episodes", type=int, default=16)
     train_parser.add_argument("--worker-count", type=int, default=3)
+    train_parser.add_argument("--architecture", choices=("mlp", "lstm"), default="mlp")
     train_parser.add_argument("--history-length", type=int, default=4)
     train_parser.add_argument("--hidden-size", type=int, default=128)
     train_parser.add_argument("--seed", type=int, default=0)
@@ -589,6 +590,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             episodes=args.episodes,
             rollout_episodes=args.rollout_episodes,
             worker_count=args.worker_count,
+            architecture=args.architecture,
             history_length=args.history_length,
             hidden_size=args.hidden_size,
             seed=args.seed,

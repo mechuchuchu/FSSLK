@@ -76,6 +76,9 @@ python -m RL_schedule.rl_policy train \
 python -m RL_schedule.rl_policy train \
   --history-length 4 --output RL_schedule/results/ppo-history.pt --eval-episodes 50
 python -m RL_schedule.rl_policy train \
+  --episodes 5000 --architecture lstm --history-length 4 \
+  --output RL_schedule/results/ppo-lstm.pt --eval-episodes 100
+python -m RL_schedule.rl_policy train \
   --worker-count 6 --history-length 4 \
   --output RL_schedule/results/ppo-history-6w.pt --eval-episodes 50
 python -m RL_schedule.rl_policy train \
@@ -95,6 +98,9 @@ checkpoint is tied to that count because its observation and action dimensions
 depend on the worker list. The current simulator scales the scheduling choices
 for one delayed shard, so this option compares policy behavior across fleet
 sizes and does not measure multi-shard training throughput.
+`--architecture lstm` feeds the recent observation frames in order through an
+LSTM actor-critic. Its recurrent state is recomputed from the fixed observation
+window at each decision; it is not carried between decisions.
 For counts above three, extra simulator profiles are seeded variations of the
 fast, medium, and slow templates; they do not represent additional measured
 Docker workers.

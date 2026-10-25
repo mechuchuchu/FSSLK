@@ -1,0 +1,122 @@
+{
+  "seen": {
+    "trained_policy": {
+      "episodes": 100,
+      "completion_rate": 1.0,
+      "mean_makespan_seconds": 10.00970566715428,
+      "makespan_stddev_seconds": 0.7969388791224091,
+      "mean_network_bytes_transferred": 410640.64,
+      "mean_network_work_seconds": 0.10222310400000001,
+      "mean_total_compute_seconds": 15.658778080447235,
+      "mean_duplicate_compute_seconds": 5.742742995052953,
+      "mean_duplicates_started": 0.58,
+      "mean_late_results_ignored": 0.51,
+      "mean_invalid_results": 0.0,
+      "mean_recovery_time_seconds": 0.0
+    },
+    "baselines": {
+      "wait_only": {
+        "episodes": 100,
+        "completion_rate": 0.96,
+        "mean_makespan_seconds": 24.65511622801125,
+        "makespan_stddev_seconds": 22.945689056410007,
+        "mean_network_bytes_transferred": 300506.24,
+        "mean_network_work_seconds": 0.14631295360000002,
+        "mean_total_compute_seconds": 24.547379057425484,
+        "mean_duplicate_compute_seconds": 0.2987380879516588,
+        "mean_duplicates_started": 0.03,
+        "mean_late_results_ignored": 0.0,
+        "mean_invalid_results": 0.0,
+        "mean_recovery_time_seconds": 0.3716872178351682
+      },
+      "fixed_timeout": {
+        "episodes": 100,
+        "completion_rate": 1.0,
+        "mean_makespan_seconds": 12.897701518737257,
+        "makespan_stddev_seconds": 2.4715862359533154,
+        "mean_network_bytes_transferred": 691790.08,
+        "mean_network_work_seconds": 0.327238272,
+        "mean_total_compute_seconds": 28.362693282328845,
+        "mean_duplicate_compute_seconds": 15.606755199841519,
+        "mean_duplicates_started": 2.01,
+        "mean_late_results_ignored": 1.84,
+        "mean_invalid_results": 0.0,
+        "mean_recovery_time_seconds": 0.046652854489927655
+      },
+      "adaptive_heuristic": {
+        "episodes": 100,
+        "completion_rate": 1.0,
+        "mean_makespan_seconds": 10.00970566715428,
+        "makespan_stddev_seconds": 0.7969388791224091,
+        "mean_network_bytes_transferred": 410640.64,
+        "mean_network_work_seconds": 0.10222310400000001,
+        "mean_total_compute_seconds": 15.658778080447233,
+        "mean_duplicate_compute_seconds": 5.742742995052953,
+        "mean_duplicates_started": 0.58,
+        "mean_late_results_ignored": 0.51,
+        "mean_invalid_results": 0.0,
+        "mean_recovery_time_seconds": 0.0
+      }
+    }
+  },
+  "unseen": {
+    "trained_policy": {
+      "episodes": 100,
+      "completion_rate": 1.0,
+      "mean_makespan_seconds": 14.90137700323741,
+      "makespan_stddev_seconds": 4.898338956855629,
+      "mean_network_bytes_transferred": 410640.64,
+      "mean_network_work_seconds": 0.19858917714285712,
+      "mean_total_compute_seconds": 22.74761275961499,
+      "mean_duplicate_compute_seconds": 8.055249896411192,
+      "mean_duplicates_started": 0.58,
+      "mean_late_results_ignored": 0.48,
+      "mean_invalid_results": 0.0,
+      "mean_recovery_time_seconds": 0.025265833290752937
+    },
+    "baselines": {
+      "wait_only": {
+        "episodes": 100,
+        "completion_rate": 0.89,
+        "mean_makespan_seconds": 24.64561942376026,
+        "makespan_stddev_seconds": 21.87274086516763,
+        "mean_network_bytes_transferred": 296438.4,
+        "mean_network_work_seconds": 0.23486430293333332,
+        "mean_total_compute_seconds": 30.153728960730906,
+        "mean_duplicate_compute_seconds": 0.8461663119029822,
+        "mean_duplicates_started": 0.05,
+        "mean_late_results_ignored": 0.0,
+        "mean_invalid_results": 0.0,
+        "mean_recovery_time_seconds": 0.9579138011313915
+      },
+      "fixed_timeout": {
+        "episodes": 100,
+        "completion_rate": 1.0,
+        "mean_makespan_seconds": 14.894740379793745,
+        "makespan_stddev_seconds": 3.1779414275095403,
+        "mean_network_bytes_transferred": 691790.08,
+        "mean_network_work_seconds": 0.5954411009523809,
+        "mean_total_compute_seconds": 34.08429496078116,
+        "mean_duplicate_compute_seconds": 19.417370434899034,
+        "mean_duplicates_started": 2.01,
+        "mean_late_results_ignored": 1.77,
+        "mean_invalid_results": 0.0,
+        "mean_recovery_time_seconds": 0.04421564240685887
+      },
+      "adaptive_heuristic": {
+        "episodes": 100,
+        "completion_rate": 1.0,
+        "mean_makespan_seconds": 12.961003976209682,
+        "makespan_stddev_seconds": 3.5118949157378516,
+        "mean_network_bytes_transferred": 463724.8,
+        "mean_network_work_seconds": 0.30619106636190474,
+        "mean_total_compute_seconds": 23.796639495593446,
+        "mean_duplicate_compute_seconds": 11.016740968983763,
+        "mean_duplicates_started": 0.85,
+        "mean_late_results_ignored": 0.75,
+        "mean_invalid_results": 0.0,
+        "mean_recovery_time_seconds": 0.0
+      }
+    }
+  }
+}

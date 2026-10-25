@@ -1,0 +1,113 @@
+{
+  "scheduler": "fixed",
+  "run_id": "78a8e17f5bef49d798564db0fbb5a41e",
+  "policy_checkpoint": null,
+  "config": {
+    "samples": 8192,
+    "input_dim": 32,
+    "hidden_dim": 2048,
+    "output_dim": 16,
+    "dataset_seed": 0,
+    "model_seed": 1,
+    "learning_rate": 0.003,
+    "target_loss": 0.01
+  },
+  "workers": [
+    "http://worker-fast:27500",
+    "http://worker-medium:27500",
+    "http://worker-slow:27500"
+  ],
+  "shard_count": 3,
+  "steps_completed": 3,
+  "final_train_loss": 1.3763725757598877,
+  "target_reached": false,
+  "target_loss_step": null,
+  "elapsed_seconds": 23.693229014999815,
+  "final_model_sha256": "ed2924d9c47360177384f3d535f73afe28e564e1ac6df4cd53cd9336a6357253",
+  "step_metrics": [
+    {
+      "model_version": 0,
+      "makespan_seconds": 7.107108809999772,
+      "gradient_aggregation_seconds": 0.00286323300042568,
+      "shard_count": 3,
+      "shard_sizes": [
+        2731,
+        2731,
+        2730
+      ],
+      "attempts": 3,
+      "duplicates_started": 0,
+      "wait_actions": 1,
+      "duplicate_actions": 0,
+      "late_results_ignored": 0,
+      "pending_worker_cancellations": 0,
+      "invalid_results_rejected": 0,
+      "invalid_responses": 0,
+      "stale_results_rejected": 0,
+      "duplicate_results_ignored": 0,
+      "weighted_pre_update_loss": 1.0569477013486903,
+      "reference_gradient_max_abs_error": 9.313225746154785e-09,
+      "reference_gradient_l2_error": 1.3169971746326556e-07,
+      "reference_loss_difference": 6.781192496418953e-09,
+      "remote_pre_update_loss": 1.0569477013486903,
+      "local_loss_after_update": 2.410291910171509,
+      "step": 1
+    },
+    {
+      "model_version": 1,
+      "makespan_seconds": 7.086603352000566,
+      "gradient_aggregation_seconds": 0.0011862840001413133,
+      "shard_count": 3,
+      "shard_sizes": [
+        2731,
+        2731,
+        2730
+      ],
+      "attempts": 3,
+      "duplicates_started": 0,
+      "wait_actions": 1,
+      "duplicate_actions": 0,
+      "late_results_ignored": 0,
+      "pending_worker_cancellations": 0,
+      "invalid_results_rejected": 0,
+      "invalid_responses": 0,
+      "stale_results_rejected": 0,
+      "duplicate_results_ignored": 0,
+      "weighted_pre_update_loss": 2.4102918315911666,
+      "reference_gradient_max_abs_error": null,
+      "reference_gradient_l2_error": null,
+      "reference_loss_difference": null,
+      "remote_pre_update_loss": 2.4102918315911666,
+      "local_loss_after_update": 1.1754164695739746,
+      "step": 2
+    },
+    {
+      "model_version": 2,
+      "makespan_seconds": 7.096899985000164,
+      "gradient_aggregation_seconds": 0.00101180799993017,
+      "shard_count": 3,
+      "shard_sizes": [
+        2731,
+        2731,
+        2730
+      ],
+      "attempts": 3,
+      "duplicates_started": 0,
+      "wait_actions": 1,
+      "duplicate_actions": 0,
+      "late_results_ignored": 0,
+      "pending_worker_cancellations": 0,
+      "invalid_results_rejected": 0,
+      "invalid_responses": 0,
+      "stale_results_rejected": 0,
+      "duplicate_results_ignored": 0,
+      "weighted_pre_update_loss": 1.1754164428275542,
+      "reference_gradient_max_abs_error": null,
+      "reference_gradient_l2_error": null,
+      "reference_loss_difference": null,
+      "remote_pre_update_loss": 1.1754164428275542,
+      "local_loss_after_update": 1.3763725757598877,
+      "step": 3
+    }
+  ]
+}

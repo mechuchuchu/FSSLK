@@ -9,8 +9,9 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
+from torch import nn
 
-from .rl_policy import PolicyValueNetwork, _load_policy
+from .rl_policy import _load_policy
 from .simulator import SimulationConfig, WorkerSpec
 
 
@@ -203,21 +204,25 @@ class LivePolicy:
         self.workers = tuple(workers)
         self.config = config
         self.fixed_timeout_seconds = fixed_timeout_seconds
-        self.policy: PolicyValueNetwork | None = None
+        self.policy: nn.Module | None = None
         if scheduler == "ppo":
             if checkpoint is None:
                 raise ValueError("a PPO checkpoint is required for scheduler=ppo")
-            self.policy, loaded_history = _load_policy(Path(checkpoint))
+            self.policy, loaded_history, loaded_worker_count = _load_policy(
+                Path(checkpoint)
+            )
             if history_length is not None and loaded_history != history_length:
                 raise ValueError("checkpoint and live scheduler history lengths differ")
+            if loaded_worker_count != len(self.workers):
+                raise ValueError("checkpoint and live scheduler worker counts differ")
             history_length = loaded_history
             expected_size = history_length * (
                 5 + len(self.workers) * 11
             )
-            if self.policy.trunk[0].in_features != expected_size:
+            if self.policy.observation_size != expected_size:
                 raise ValueError("checkpoint observation size does not match live workers")
             expected_actions = len(config.wait_seconds) + len(self.workers)
-            if self.policy.policy_head.out_features != expected_actions:
+            if self.policy.action_count != expected_actions:
                 raise ValueError("checkpoint action count does not match live workers")
             self.policy.eval()
         if history_length is None:

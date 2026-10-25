@@ -1,0 +1,13 @@
+services:
+  worker-fast:
+    environment:
+      RL_NETEM_LOSS: "0%"
+  worker-medium:
+    environment:
+      RL_NETEM_LOSS: "0%"
+  worker-slow:
+    environment:
+      RL_NETEM_DELAY: "100ms"
+      RL_NETEM_RATE: "50mbit"
+      RL_NETEM_LOSS: "0%"
+    cpus: 0.25

@@ -1,0 +1,445 @@
+{
+  "experiment": "ppo_worker_count_scaling",
+  "method": {
+    "algorithm": "PPO",
+    "history_length": 4,
+    "hidden_size": 128,
+    "training_episodes_per_worker_count": 1000,
+    "evaluation_episodes_per_condition": 50,
+    "seed": 0,
+    "conditions": [
+      "seen",
+      "unseen"
+    ],
+    "note": "The simulator models scheduling for one delayed shard, not multi-shard training throughput.",
+    "worker_profile_generation": "For counts above three, extra simulator profiles are seeded variations of the fast/medium/slow templates; no additional Docker workers were measured."
+  },
+  "worker_counts": {
+    "3": {
+      "checkpoint": "RL_schedule/results/ppo-history.pt",
+      "metrics_source": "RL_schedule/results/ppo-training.json",
+      "training_config": {
+        "episodes": 1000,
+        "rollout_episodes": 16,
+        "history_length": 4,
+        "hidden_size": 128,
+        "seed": 0,
+        "learning_rate": 0.0003,
+        "gamma_per_second": 0.995,
+        "gae_lambda_per_second": 0.97,
+        "clip_epsilon": 0.2,
+        "entropy_weight": 0.01,
+        "value_weight": 0.5,
+        "update_epochs": 4,
+        "minibatch_size": 128,
+        "worker_count": 3
+      },
+      "evaluation": {
+        "seen": {
+          "trained_policy": {
+            "episodes": 50,
+            "completion_rate": 1.0,
+            "mean_makespan_seconds": 10.028510135887341,
+            "makespan_stddev_seconds": 0.8265250077760149,
+            "mean_network_bytes_transferred": 414572.8,
+            "mean_network_work_seconds": 0.10325224960000001,
+            "mean_total_compute_seconds": 15.878537256160312,
+            "mean_duplicate_compute_seconds": 5.944431933072971,
+            "mean_duplicates_started": 0.6,
+            "mean_late_results_ignored": 0.52,
+            "mean_invalid_results": 0.0,
+            "mean_recovery_time_seconds": 0.0
+          },
+          "baselines": {
+            "wait_only": {
+              "episodes": 50,
+              "completion_rate": 0.98,
+              "mean_makespan_seconds": 24.263114825732995,
+              "makespan_stddev_seconds": 21.069778986542094,
+              "mean_network_bytes_transferred": 310404.48,
+              "mean_network_work_seconds": 0.15000955648000003,
+              "mean_total_compute_seconds": 23.980164534238178,
+              "mean_duplicate_compute_seconds": 0.5974761759033176,
+              "mean_duplicates_started": 0.06,
+              "mean_late_results_ignored": 0.0,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.7433744356703365
+            },
+            "fixed_timeout": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 13.007646985469176,
+              "makespan_stddev_seconds": 2.434069050029606,
+              "mean_network_bytes_transferred": 693756.16,
+              "mean_network_work_seconds": 0.33039913600000004,
+              "mean_total_compute_seconds": 28.68619581664167,
+              "mean_duplicate_compute_seconds": 15.868419352952351,
+              "mean_duplicates_started": 2.02,
+              "mean_late_results_ignored": 1.86,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.09330570897985531
+            },
+            "adaptive_heuristic": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 10.028510135887341,
+              "makespan_stddev_seconds": 0.8265250077760149,
+              "mean_network_bytes_transferred": 414572.8,
+              "mean_network_work_seconds": 0.10325224960000001,
+              "mean_total_compute_seconds": 15.878537256160312,
+              "mean_duplicate_compute_seconds": 5.94443193307297,
+              "mean_duplicates_started": 0.6,
+              "mean_late_results_ignored": 0.52,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            }
+          }
+        },
+        "unseen": {
+          "trained_policy": {
+            "episodes": 50,
+            "completion_rate": 1.0,
+            "mean_makespan_seconds": 15.191518588413878,
+            "makespan_stddev_seconds": 4.8189975498995805,
+            "mean_network_bytes_transferred": 414572.8,
+            "mean_network_work_seconds": 0.2015198613333333,
+            "mean_total_compute_seconds": 23.328921492948883,
+            "mean_duplicate_compute_seconds": 8.374122037783177,
+            "mean_duplicates_started": 0.6,
+            "mean_late_results_ignored": 0.5,
+            "mean_invalid_results": 0.0,
+            "mean_recovery_time_seconds": 0.050531666581505874
+          },
+          "baselines": {
+            "wait_only": {
+              "episodes": 50,
+              "completion_rate": 0.9,
+              "mean_makespan_seconds": 23.96788678822929,
+              "makespan_stddev_seconds": 17.646874753830698,
+              "mean_network_bytes_transferred": 300404.48,
+              "mean_network_work_seconds": 0.24299332876190477,
+              "mean_total_compute_seconds": 29.380355209936493,
+              "mean_duplicate_compute_seconds": 0.8309635276825237,
+              "mean_duplicates_started": 0.06,
+              "mean_late_results_ignored": 0.0,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.9871983737558999
+            },
+            "fixed_timeout": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 15.39525412147442,
+              "makespan_stddev_seconds": 3.572882268524005,
+              "mean_network_bytes_transferred": 693756.16,
+              "mean_network_work_seconds": 0.6032220647619048,
+              "mean_total_compute_seconds": 35.57357014436596,
+              "mean_duplicate_compute_seconds": 20.453518583895733,
+              "mean_duplicates_started": 2.02,
+              "mean_late_results_ignored": 1.78,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.08843128481371774
+            },
+            "adaptive_heuristic": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 13.594352368843976,
+              "makespan_stddev_seconds": 4.024322528778552,
+              "mean_network_bytes_transferred": 465690.88,
+              "mean_network_work_seconds": 0.3056315904,
+              "mean_total_compute_seconds": 25.054769855164924,
+              "mean_duplicate_compute_seconds": 11.644548762511421,
+              "mean_duplicates_started": 0.86,
+              "mean_late_results_ignored": 0.76,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            }
+          }
+        }
+      }
+    },
+    "4": {
+      "checkpoint": "RL_schedule/results/ppo-history-4w.pt",
+      "metrics_source": "RL_schedule/results/ppo-training-4w.json",
+      "training_config": {
+        "episodes": 1000,
+        "rollout_episodes": 16,
+        "worker_count": 4,
+        "history_length": 4,
+        "hidden_size": 128,
+        "seed": 0,
+        "learning_rate": 0.0003,
+        "gamma_per_second": 0.995,
+        "gae_lambda_per_second": 0.97,
+        "clip_epsilon": 0.2,
+        "entropy_weight": 0.01,
+        "value_weight": 0.5,
+        "update_epochs": 4,
+        "minibatch_size": 128
+      },
+      "evaluation": {
+        "seen": {
+          "trained_policy": {
+            "episodes": 50,
+            "completion_rate": 1.0,
+            "mean_makespan_seconds": 9.831296953645493,
+            "makespan_stddev_seconds": 0.5875706661805485,
+            "mean_network_bytes_transferred": 591520.0,
+            "mean_network_work_seconds": 0.10242753724619981,
+            "mean_total_compute_seconds": 24.43915779778116,
+            "mean_duplicate_compute_seconds": 14.693359152010448,
+            "mean_duplicates_started": 1.5,
+            "mean_late_results_ignored": 1.48,
+            "mean_invalid_results": 0.0,
+            "mean_recovery_time_seconds": 0.0
+          },
+          "baselines": {
+            "wait_only": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 24.281928113347266,
+              "makespan_stddev_seconds": 22.396116553964404,
+              "mean_network_bytes_transferred": 302540.16,
+              "mean_network_work_seconds": 0.14244513321869556,
+              "mean_total_compute_seconds": 24.076198291580155,
+              "mean_duplicate_compute_seconds": 0.22482189459435603,
+              "mean_duplicates_started": 0.02,
+              "mean_late_results_ignored": 0.0,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.28840149770277407
+            },
+            "fixed_timeout": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 12.513833078885892,
+              "makespan_stddev_seconds": 2.3395725870051853,
+              "mean_network_bytes_transferred": 886432.0,
+              "mean_network_work_seconds": 0.331938961438155,
+              "mean_total_compute_seconds": 34.72339335410541,
+              "mean_duplicate_compute_seconds": 22.296270493878215,
+              "mean_duplicates_started": 3.0,
+              "mean_late_results_ignored": 2.88,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            },
+            "adaptive_heuristic": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 10.132251369811131,
+              "makespan_stddev_seconds": 0.6921608358232718,
+              "mean_network_bytes_transferred": 406708.48,
+              "mean_network_work_seconds": 0.09457232366454624,
+              "mean_total_compute_seconds": 15.671384690325638,
+              "mean_duplicate_compute_seconds": 5.625571568911898,
+              "mean_duplicates_started": 0.56,
+              "mean_late_results_ignored": 0.54,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            }
+          }
+        },
+        "unseen": {
+          "trained_policy": {
+            "episodes": 50,
+            "completion_rate": 1.0,
+            "mean_makespan_seconds": 12.940824212834151,
+            "makespan_stddev_seconds": 2.2431584287773383,
+            "mean_network_bytes_transferred": 591520.0,
+            "mean_network_work_seconds": 0.19856768161958605,
+            "mean_total_compute_seconds": 31.770141097967613,
+            "mean_duplicate_compute_seconds": 18.98953493894687,
+            "mean_duplicates_started": 1.5,
+            "mean_late_results_ignored": 1.48,
+            "mean_invalid_results": 0.0,
+            "mean_recovery_time_seconds": 0.0
+          },
+          "baselines": {
+            "wait_only": {
+              "episodes": 50,
+              "completion_rate": 0.92,
+              "mean_makespan_seconds": 23.27020729244885,
+              "makespan_stddev_seconds": 16.63063485370812,
+              "mean_network_bytes_transferred": 294540.16,
+              "mean_network_work_seconds": 0.23101763222957267,
+              "mean_total_compute_seconds": 30.71789745285737,
+              "mean_duplicate_compute_seconds": 0.09780122057142847,
+              "mean_duplicates_started": 0.02,
+              "mean_late_results_ignored": 0.0,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            },
+            "fixed_timeout": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 14.772825556163015,
+              "makespan_stddev_seconds": 2.500326144596996,
+              "mean_network_bytes_transferred": 890364.16,
+              "mean_network_work_seconds": 0.6104489160584694,
+              "mean_total_compute_seconds": 43.47920057429176,
+              "mean_duplicate_compute_seconds": 28.86842476684279,
+              "mean_duplicates_started": 3.02,
+              "mean_late_results_ignored": 2.78,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.064812153801861
+            },
+            "adaptive_heuristic": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 13.1798885500196,
+              "makespan_stddev_seconds": 3.4512837405485963,
+              "mean_network_bytes_transferred": 512876.8,
+              "mean_network_work_seconds": 0.3017190041534128,
+              "mean_total_compute_seconds": 26.98807351861415,
+              "mean_duplicate_compute_seconds": 13.968918833619131,
+              "mean_duplicates_started": 1.1,
+              "mean_late_results_ignored": 1.08,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            }
+          }
+        }
+      }
+    },
+    "6": {
+      "checkpoint": "RL_schedule/results/ppo-history-6w.pt",
+      "metrics_source": "RL_schedule/results/ppo-training-6w.json",
+      "training_config": {
+        "episodes": 1000,
+        "rollout_episodes": 16,
+        "worker_count": 6,
+        "history_length": 4,
+        "hidden_size": 128,
+        "seed": 0,
+        "learning_rate": 0.0003,
+        "gamma_per_second": 0.995,
+        "gae_lambda_per_second": 0.97,
+        "clip_epsilon": 0.2,
+        "entropy_weight": 0.01,
+        "value_weight": 0.5,
+        "update_epochs": 4,
+        "minibatch_size": 128
+      },
+      "evaluation": {
+        "seen": {
+          "trained_policy": {
+            "episodes": 50,
+            "completion_rate": 1.0,
+            "mean_makespan_seconds": 9.88832533067041,
+            "makespan_stddev_seconds": 0.566441676632956,
+            "mean_network_bytes_transferred": 795992.32,
+            "mean_network_work_seconds": 0.15842709643636846,
+            "mean_total_compute_seconds": 26.43710526231449,
+            "mean_duplicate_compute_seconds": 16.646287853554558,
+            "mean_duplicates_started": 2.54,
+            "mean_late_results_ignored": 2.5,
+            "mean_invalid_results": 0.0,
+            "mean_recovery_time_seconds": 0.0
+          },
+          "baselines": {
+            "wait_only": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 24.7403589229445,
+              "makespan_stddev_seconds": 21.30688937907458,
+              "mean_network_bytes_transferred": 308472.32,
+              "mean_network_work_seconds": 0.16523875433206556,
+              "mean_total_compute_seconds": 24.467454864762352,
+              "mean_duplicate_compute_seconds": 0.4395360631358382,
+              "mean_duplicates_started": 0.04,
+              "mean_late_results_ignored": 0.0,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.5477911961059203
+            },
+            "fixed_timeout": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 13.134080378383388,
+              "makespan_stddev_seconds": 2.3486847008411194,
+              "mean_network_bytes_transferred": 1279648.0,
+              "mean_network_work_seconds": 0.6637932100293433,
+              "mean_total_compute_seconds": 53.12671889746375,
+              "mean_duplicate_compute_seconds": 40.091090366644096,
+              "mean_duplicates_started": 5.0,
+              "mean_late_results_ignored": 4.68,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.013970162807233314
+            },
+            "adaptive_heuristic": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 10.097285007246608,
+              "makespan_stddev_seconds": 0.712219404836185,
+              "mean_network_bytes_transferred": 430301.44,
+              "mean_network_work_seconds": 0.1080834399295868,
+              "mean_total_compute_seconds": 16.820511569290517,
+              "mean_duplicate_compute_seconds": 6.821406439346342,
+              "mean_duplicates_started": 0.68,
+              "mean_late_results_ignored": 0.64,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            }
+          }
+        },
+        "unseen": {
+          "trained_policy": {
+            "episodes": 50,
+            "completion_rate": 1.0,
+            "mean_makespan_seconds": 12.6572236433583,
+            "makespan_stddev_seconds": 1.0708020060696775,
+            "mean_network_bytes_transferred": 748806.4,
+            "mean_network_work_seconds": 0.312353004190022,
+            "mean_total_compute_seconds": 33.47509286622851,
+            "mean_duplicate_compute_seconds": 20.995092392504635,
+            "mean_duplicates_started": 2.3,
+            "mean_late_results_ignored": 2.26,
+            "mean_invalid_results": 0.0,
+            "mean_recovery_time_seconds": 0.0
+          },
+          "baselines": {
+            "wait_only": {
+              "episodes": 50,
+              "completion_rate": 0.88,
+              "mean_makespan_seconds": 23.800556651870338,
+              "makespan_stddev_seconds": 20.422325297825722,
+              "mean_network_bytes_transferred": 290540.16,
+              "mean_network_work_seconds": 0.2505862861837369,
+              "mean_total_compute_seconds": 33.09848342374821,
+              "mean_duplicate_compute_seconds": 0.09780122057142847,
+              "mean_duplicates_started": 0.02,
+              "mean_late_results_ignored": 0.0,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            },
+            "fixed_timeout": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 14.503937935576193,
+              "makespan_stddev_seconds": 2.1370186299247136,
+              "mean_network_bytes_transferred": 1283580.16,
+              "mean_network_work_seconds": 1.1508324038525517,
+              "mean_total_compute_seconds": 60.867110263758384,
+              "mean_duplicate_compute_seconds": 46.54880436241203,
+              "mean_duplicates_started": 5.02,
+              "mean_late_results_ignored": 4.46,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.11548580462704493
+            },
+            "adaptive_heuristic": {
+              "episodes": 50,
+              "completion_rate": 1.0,
+              "mean_makespan_seconds": 12.208115764051765,
+              "makespan_stddev_seconds": 2.5341799168886285,
+              "mean_network_bytes_transferred": 583655.68,
+              "mean_network_work_seconds": 0.4309436314125879,
+              "mean_total_compute_seconds": 28.98193903719011,
+              "mean_duplicate_compute_seconds": 16.951562253983937,
+              "mean_duplicates_started": 1.46,
+              "mean_late_results_ignored": 1.42,
+              "mean_invalid_results": 0.0,
+              "mean_recovery_time_seconds": 0.0
+            }
+          }
+        }
+      }
+    }
+  }
+}
