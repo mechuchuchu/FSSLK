@@ -1,0 +1,60 @@
+x-gradient-worker: &gradient-worker
+  build:
+    context: ..
+    dockerfile: RL_schedule/Dockerfile
+  entrypoint: ["/bin/sh", "/app/RL_schedule/start_gradient_worker.sh"]
+  command: ["--host", "0.0.0.0", "--port", "27500"]
+  cap_add:
+    - NET_ADMIN
+  restart: "no"
+
+services:
+  worker-fast:
+    <<: *gradient-worker
+    environment:
+      RL_NETEM_DELAY: "2ms"
+      RL_NETEM_RATE: "500mbit"
+      RL_NETEM_LOSS: "0%"
+    cpus: 1.0
+
+  worker-medium:
+    <<: *gradient-worker
+    environment:
+      RL_NETEM_DELAY: "25ms"
+      RL_NETEM_RATE: "50mbit"
+      RL_NETEM_LOSS: "1%"
+    cpus: 0.75
+
+  worker-slow:
+    <<: *gradient-worker
+    environment:
+      RL_NETEM_DELAY: "75ms"
+      RL_NETEM_RATE: "10mbit"
+      RL_NETEM_LOSS: "3%"
+    cpus: 0.5
+
+  coordinator:
+    build:
+      context: ..
+      dockerfile: RL_schedule/Dockerfile
+    entrypoint: ["python", "-m", "RL_schedule.live_train"]
+    command:
+      - "--workers"
+      - "http://worker-fast:27500,http://worker-medium:27500,http://worker-slow:27500"
+      - "--scheduler"
+      - "${RL_SCHEDULER:-adaptive}"
+      - "--policy-checkpoint"
+      - "${RL_POLICY_CHECKPOINT:-/results/ppo-history.pt}"
+      - "--steps"
+      - "${RL_STEPS:-100}"
+      - "--hidden-dim"
+      - "256"
+      - "--json"
+      - "/results/live-run.json"
+    volumes:
+      - "./results:/results"
+    depends_on:
+      - worker-fast
+      - worker-medium
+      - worker-slow
+    restart: "no"
