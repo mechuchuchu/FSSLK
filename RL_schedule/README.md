@@ -78,6 +78,9 @@ python -m RL_schedule.rl_policy train \
 python -m RL_schedule.rl_policy train \
   --episodes 5000 --architecture lstm --history-length 4 \
   --output RL_schedule/results/ppo-lstm.pt --eval-episodes 100
+python -m RL_schedule.rl_policy train-rloo \
+  --episodes 5000 --group-size 8 \
+  --output RL_schedule/results/rloo-lstm.pt --eval-episodes 100
 python -m RL_schedule.rl_policy train \
   --worker-count 6 --history-length 4 \
   --output RL_schedule/results/ppo-history-6w.pt --eval-episodes 50
@@ -101,6 +104,11 @@ sizes and does not measure multi-shard training throughput.
 `--architecture lstm` feeds the recent observation frames in order through an
 LSTM actor-critic. Its recurrent state is recomputed from the fixed observation
 window at each decision; it is not carried between decisions.
+`train-rloo` uses an actor-only LSTM whose hidden state persists across
+decisions within an episode. It samples groups of trajectories under the same
+worker condition and uses each trajectory's return minus the other group
+members' mean return as its RLOO advantage. It performs one on-policy update
+per group and does not train a value critic.
 For counts above three, extra simulator profiles are seeded variations of the
 fast, medium, and slow templates; they do not represent additional measured
 Docker workers.

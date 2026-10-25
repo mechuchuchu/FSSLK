@@ -65,6 +65,30 @@ class PPOConfig:
             raise ValueError("update_epochs and minibatch_size must be at least 1")
 
 
+@dataclass(frozen=True)
+class RLOOConfig:
+    episodes: int = 5000
+    group_size: int = 8
+    worker_count: int = 3
+    history_length: int = 4
+    hidden_size: int = 128
+    seed: int = 0
+    learning_rate: float = 0.0003
+    entropy_weight: float = 0.01
+
+    def validate(self) -> None:
+        if self.episodes < self.group_size or self.group_size < 2:
+            raise ValueError("RLOO requires at least two episodes per group")
+        if self.episodes % self.group_size:
+            raise ValueError("episode count must be divisible by group_size")
+        if self.worker_count < 1 or self.history_length < 1 or self.hidden_size < 1:
+            raise ValueError("worker_count, history_length, and hidden_size must be positive")
+        if self.learning_rate <= 0 or not math.isfinite(self.learning_rate):
+            raise ValueError("learning_rate must be positive and finite")
+        if self.entropy_weight < 0 or not math.isfinite(self.entropy_weight):
+            raise ValueError("entropy_weight must be finite and non-negative")
+
+
 class PolicyValueNetwork(nn.Module):
     """MLP actor and critic over concatenated recent observations."""
 
@@ -128,6 +152,66 @@ class LSTMPolicyValueNetwork(nn.Module):
         return logits, values
 
 
+class StatefulLSTMPolicyNetwork(nn.Module):
+    """Actor-only LSTM that keeps recurrent state across episode decisions."""
+
+    def __init__(
+        self,
+        observation_size: int,
+        action_count: int,
+        hidden_size: int,
+        history_length: int,
+    ) -> None:
+        super().__init__()
+        if history_length < 1 or observation_size % history_length:
+            raise ValueError("observation size must be divisible by history length")
+        self.observation_size = observation_size
+        self.action_count = action_count
+        self.history_length = history_length
+        self.frame_size = observation_size // history_length
+        self.hidden_size = hidden_size
+        self.lstm = nn.LSTM(
+            input_size=self.frame_size,
+            hidden_size=hidden_size,
+            batch_first=True,
+        )
+        self.policy_head = nn.Linear(hidden_size, action_count)
+
+    def initial_state(self, batch_size: int = 1) -> tuple[torch.Tensor, torch.Tensor]:
+        weight = self.lstm.weight_ih_l0
+        shape = (1, batch_size, self.hidden_size)
+        return weight.new_zeros(shape), weight.new_zeros(shape)
+
+    def latest_frame(self, observations: torch.Tensor) -> torch.Tensor:
+        if observations.ndim == 1:
+            observations = observations.unsqueeze(0)
+        return observations.reshape(
+            observations.shape[0], self.history_length, self.frame_size
+        )[:, -1, :]
+
+    def forward_step(
+        self,
+        observations: torch.Tensor,
+        action_masks: torch.Tensor,
+        hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor]]:
+        frames = self.latest_frame(observations)
+        if hidden_state is None:
+            hidden_state = self.initial_state(frames.shape[0])
+        encoded, next_state = self.lstm(frames.unsqueeze(1), hidden_state)
+        logits = self.policy_head(encoded[:, -1, :]).masked_fill(
+            ~action_masks, -1e9
+        )
+        return logits, next_state
+
+    def forward_sequence(
+        self, frames: torch.Tensor, action_masks: torch.Tensor
+    ) -> torch.Tensor:
+        encoded, _ = self.lstm(frames.unsqueeze(0), self.initial_state())
+        logits = self.policy_head(encoded.squeeze(0))
+        return logits.masked_fill(~action_masks, -1e9)
+
+
 def _make_policy_network(
     architecture: str,
     observation_size: int,
@@ -139,6 +223,10 @@ def _make_policy_network(
         return PolicyValueNetwork(observation_size, action_count, hidden_size)
     if architecture == "lstm":
         return LSTMPolicyValueNetwork(
+            observation_size, action_count, hidden_size, history_length
+        )
+    if architecture == "lstm_stateful":
+        return StatefulLSTMPolicyNetwork(
             observation_size, action_count, hidden_size, history_length
         )
     raise ValueError(f"unknown policy architecture: {architecture}")
@@ -215,6 +303,90 @@ def _collect_episode(
     metrics = env.metrics()
     metrics["episode_return"] = sum(rewards)
     return trajectory, metrics
+
+
+def _collect_rloo_episode(
+    policy: StatefulLSTMPolicyNetwork,
+    workers: Sequence[WorkerSpec],
+    history_length: int,
+    seed: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    env = SchedulingEnv(workers=workers, history_length=history_length)
+    observation, mask = env.reset(seed)
+    trajectory = {"frames": [], "masks": [], "actions": []}
+    rewards: list[float] = []
+    hidden_state = policy.initial_state()
+
+    while not env.done:
+        frame = policy.latest_frame(observation)[0]
+        with torch.no_grad():
+            logits, hidden_state = policy.forward_step(
+                observation.unsqueeze(0), mask.unsqueeze(0), hidden_state
+            )
+            action = Categorical(logits=logits).sample()
+        trajectory["frames"].append(frame)
+        trajectory["masks"].append(mask)
+        trajectory["actions"].append(int(action.item()))
+        observation, reward, done, mask, _ = env.step(int(action.item()))
+        rewards.append(reward)
+        if done:
+            break
+
+    metrics = env.metrics()
+    metrics["episode_return"] = sum(rewards)
+    metrics["decision_count"] = len(trajectory["actions"])
+    trajectory["episode_return"] = metrics["episode_return"]
+    trajectory["metrics"] = metrics
+    return trajectory, metrics
+
+
+def _update_rloo_group(
+    policy: StatefulLSTMPolicyNetwork,
+    optimizer: torch.optim.Optimizer,
+    trajectories: list[dict[str, Any]],
+    entropy_weight: float,
+) -> dict[str, float]:
+    if len(trajectories) < 2:
+        raise ValueError("RLOO update requires at least two trajectories")
+    rewards = torch.tensor(
+        [float(trajectory["episode_return"]) for trajectory in trajectories],
+        dtype=torch.float32,
+    )
+    reward_total = rewards.sum()
+    advantages = torch.stack(
+        [rewards[index] - (reward_total - rewards[index]) / (len(trajectories) - 1)
+         for index in range(len(trajectories))]
+    ).detach()
+
+    policy_terms: list[torch.Tensor] = []
+    entropy_terms: list[torch.Tensor] = []
+    for trajectory, advantage in zip(trajectories, advantages):
+        frames = torch.stack(trajectory["frames"])
+        masks = torch.stack(trajectory["masks"])
+        actions = torch.tensor(trajectory["actions"], dtype=torch.long)
+        logits = policy.forward_sequence(frames, masks)
+        distribution = Categorical(logits=logits)
+        sequence_log_probability = distribution.log_prob(actions).sum()
+        policy_terms.append(-advantage * sequence_log_probability)
+        entropy_terms.append(distribution.entropy().mean())
+
+    policy_loss = torch.stack(policy_terms).mean()
+    entropy = torch.stack(entropy_terms).mean()
+    loss = policy_loss - entropy_weight * entropy
+    optimizer.zero_grad(set_to_none=True)
+    loss.backward()
+    nn.utils.clip_grad_norm_(policy.parameters(), max_norm=1.0)
+    optimizer.step()
+    return {
+        "policy_loss": float(policy_loss.detach().item()),
+        "entropy": float(entropy.detach().item()),
+        "mean_reward": float(rewards.mean().item()),
+        "reward_stddev": float(rewards.std(unbiased=False).item()),
+        "advantage_stddev": float(advantages.std(unbiased=False).item()),
+        "mean_decisions": sum(
+            int(trajectory["metrics"]["decision_count"]) for trajectory in trajectories
+        ) / len(trajectories),
+    }
 
 
 def _update_policy(
@@ -420,6 +592,89 @@ def train_policy(
     }
 
 
+def train_rloo_policy(config: RLOOConfig, output: Path) -> dict[str, Any]:
+    config.validate()
+    torch.manual_seed(config.seed)
+    prototype_env = SchedulingEnv(
+        workers=evaluation_workers("seen", config.worker_count),
+        history_length=config.history_length,
+    )
+    policy = StatefulLSTMPolicyNetwork(
+        prototype_env.observation_size,
+        prototype_env.action_count,
+        config.hidden_size,
+        config.history_length,
+    )
+    optimizer = torch.optim.Adam(policy.parameters(), lr=config.learning_rate)
+    updates: list[dict[str, float | int]] = []
+    episode = 0
+    group_count = config.episodes // config.group_size
+
+    for group_index in range(group_count):
+        workers = training_workers(
+            config.seed + group_index * 7919, config.worker_count
+        )
+        trajectories: list[dict[str, Any]] = []
+        group_metrics: list[dict[str, Any]] = []
+        for group_member in range(config.group_size):
+            trajectory, metrics = _collect_rloo_episode(
+                policy,
+                workers,
+                config.history_length,
+                seed=config.seed + 100_003 + episode,
+            )
+            trajectories.append(trajectory)
+            group_metrics.append(metrics)
+            episode += 1
+
+        update = _update_rloo_group(
+            policy, optimizer, trajectories, config.entropy_weight
+        )
+        successful = [metric for metric in group_metrics if metric["success"]]
+        update.update(
+            {
+                "episodes_completed": episode,
+                "episodes_in_group": config.group_size,
+                "completion_rate": len(successful) / config.group_size,
+                "mean_makespan_seconds": (
+                    sum(float(metric["makespan_seconds"]) for metric in successful)
+                    / len(successful)
+                    if successful
+                    else 0.0
+                ),
+            }
+        )
+        updates.append(update)
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint = {
+        "format": "rl-schedule-rloo-v1",
+        "algorithm": "RLOO",
+        "architecture": "lstm_stateful",
+        "history_length": config.history_length,
+        "worker_count": config.worker_count,
+        "hidden_size": config.hidden_size,
+        "observation_size": prototype_env.observation_size,
+        "action_count": prototype_env.action_count,
+        "episodes_completed": episode,
+        "state_dict": policy.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "torch_rng_state": torch.get_rng_state(),
+        "training_config": asdict(config),
+    }
+    torch.save(checkpoint, output)
+    return {
+        "checkpoint": str(output),
+        "algorithm": "RLOO",
+        "architecture": "lstm_stateful",
+        "parameter_count": sum(parameter.numel() for parameter in policy.parameters()),
+        "training_config": asdict(config),
+        "episodes_completed_total": episode,
+        "group_updates": group_count,
+        "updates": updates,
+    }
+
+
 def _load_policy(checkpoint_path: Path) -> tuple[nn.Module, int, int]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     history_length = int(checkpoint["history_length"])
@@ -450,9 +705,15 @@ def _run_policy_episode(
 ) -> dict[str, Any]:
     env = SchedulingEnv(workers=workers, history_length=history_length)
     observation, mask = env.reset(seed)
+    hidden_state: tuple[torch.Tensor, torch.Tensor] | None = None
     while not env.done:
         with torch.no_grad():
-            logits, _ = policy(observation.unsqueeze(0), mask.unsqueeze(0))
+            if isinstance(policy, StatefulLSTMPolicyNetwork):
+                logits, hidden_state = policy.forward_step(
+                    observation.unsqueeze(0), mask.unsqueeze(0), hidden_state
+                )
+            else:
+                logits, _ = policy(observation.unsqueeze(0), mask.unsqueeze(0))
         action = int(logits.argmax(dim=-1).item())
         observation, _, _, mask, _ = env.step(action)
     return env.metrics()
@@ -572,6 +833,21 @@ def main(argv: Sequence[str] | None = None) -> None:
     train_parser.add_argument("--metrics", type=Path)
     train_parser.add_argument("--eval-episodes", type=int, default=100)
 
+    rloo_parser = commands.add_parser(
+        "train-rloo", help="train a stateful LSTM policy with RLOO"
+    )
+    rloo_parser.add_argument("--episodes", type=int, default=5000)
+    rloo_parser.add_argument("--group-size", type=int, default=8)
+    rloo_parser.add_argument("--worker-count", type=int, default=3)
+    rloo_parser.add_argument("--history-length", type=int, default=4)
+    rloo_parser.add_argument("--hidden-size", type=int, default=128)
+    rloo_parser.add_argument("--seed", type=int, default=0)
+    rloo_parser.add_argument("--learning-rate", type=float, default=0.0003)
+    rloo_parser.add_argument("--entropy-weight", type=float, default=0.01)
+    rloo_parser.add_argument("--output", type=Path, required=True)
+    rloo_parser.add_argument("--metrics", type=Path)
+    rloo_parser.add_argument("--eval-episodes", type=int, default=100)
+
     eval_parser = commands.add_parser("evaluate", help="compare a saved PPO scheduler")
     eval_parser.add_argument("--checkpoint", type=Path, required=True)
     eval_parser.add_argument("--episodes", type=int, default=100)
@@ -596,6 +872,29 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=args.seed,
         )
         result = train_policy(config, args.output, args.resume_checkpoint)
+        if args.eval_episodes > 0:
+            result["evaluation"] = evaluate_checkpoint(
+                args.output,
+                episodes=args.eval_episodes,
+                seed=args.seed + 500_000,
+            )
+        rendered = json.dumps(result, indent=2)
+        if args.metrics:
+            args.metrics.parent.mkdir(parents=True, exist_ok=True)
+            args.metrics.write_text(rendered + "\n", encoding="utf-8")
+        print(rendered)
+    elif args.command == "train-rloo":
+        config = RLOOConfig(
+            episodes=args.episodes,
+            group_size=args.group_size,
+            worker_count=args.worker_count,
+            history_length=args.history_length,
+            hidden_size=args.hidden_size,
+            seed=args.seed,
+            learning_rate=args.learning_rate,
+            entropy_weight=args.entropy_weight,
+        )
+        result = train_rloo_policy(config, args.output)
         if args.eval_episodes > 0:
             result["evaluation"] = evaluate_checkpoint(
                 args.output,

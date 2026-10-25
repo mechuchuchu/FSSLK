@@ -256,7 +256,7 @@ def _run_gradient_round(
     accepted_task_ids: set[str] = set()
     history = policy.history
     for shard_id in range(shard_count):
-        history.reset_shard(shard_id)
+        policy.reset_shard(shard_id)
 
     round_started = time.monotonic()
     state_dict = {
@@ -422,7 +422,13 @@ def _run_gradient_round(
                     if not busy:
                         action_mask[3 + worker_index] = True
             now = time.monotonic() - round_started
-            action = policy.act(observation, action_mask, now, shard_attempts)
+            action = policy.act(
+                observation,
+                action_mask,
+                now,
+                shard_attempts,
+                shard_id=target_shard,
+            )
             action_valid = (
                 0 <= action < action_mask.numel() and bool(action_mask[action])
             )

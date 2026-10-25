@@ -11,7 +11,7 @@ from typing import Sequence
 import torch
 from torch import nn
 
-from .rl_policy import _load_policy
+from .rl_policy import StatefulLSTMPolicyNetwork, _load_policy
 from .simulator import SimulationConfig, WorkerSpec
 
 
@@ -205,6 +205,9 @@ class LivePolicy:
         self.config = config
         self.fixed_timeout_seconds = fixed_timeout_seconds
         self.policy: nn.Module | None = None
+        self.policy_hidden_states: dict[
+            int, tuple[torch.Tensor, torch.Tensor]
+        ] = {}
         if scheduler == "ppo":
             if checkpoint is None:
                 raise ValueError("a PPO checkpoint is required for scheduler=ppo")
@@ -230,17 +233,35 @@ class LivePolicy:
         self.history_length = history_length
         self.history = LiveObservationHistory(workers, config, history_length)
 
+    def reset_shard(self, shard_id: int) -> None:
+        self.history.reset_shard(shard_id)
+        self.policy_hidden_states.pop(shard_id, None)
+
     def act(
         self,
         observation: torch.Tensor,
         action_mask: torch.Tensor,
         now: float,
         shard_attempts: Sequence[LiveAttempt],
+        shard_id: int | None = None,
     ) -> int:
         if self.scheduler == "ppo":
             assert self.policy is not None
             with torch.no_grad():
-                logits, _ = self.policy(observation.unsqueeze(0), action_mask.unsqueeze(0))
+                if isinstance(self.policy, StatefulLSTMPolicyNetwork):
+                    if shard_id is None:
+                        raise ValueError("stateful LSTM decisions require a shard_id")
+                    hidden_state = self.policy_hidden_states.get(shard_id)
+                    logits, hidden_state = self.policy.forward_step(
+                        observation.unsqueeze(0),
+                        action_mask.unsqueeze(0),
+                        hidden_state,
+                    )
+                    self.policy_hidden_states[shard_id] = hidden_state
+                else:
+                    logits, _ = self.policy(
+                        observation.unsqueeze(0), action_mask.unsqueeze(0)
+                    )
             return int(logits.argmax(dim=-1).item())
         return self._heuristic_action(action_mask, now, shard_attempts)
 
