@@ -123,6 +123,7 @@ def main() -> None:
     parser.add_argument("--input-dim", type=int, default=32)
     parser.add_argument("--output-dim", type=int, default=16)
     parser.add_argument("--hidden-dim", type=int, default=4096)
+    parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--learning-rate", type=float, default=0.003)
     parser.add_argument("--target-loss", type=float, default=0.01)
@@ -148,6 +149,7 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         seed=args.seed,
         epochs=1,
+        batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         target_loss=args.target_loss,
     )

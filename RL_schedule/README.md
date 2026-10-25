@@ -3,6 +3,15 @@
 This directory contains the implementation and design notes for the staged RL
 scheduling study. The experiments can run independently of the FSSLK runtime.
 
+The separate `wan_sim` package provides an event-driven simulator for
+synchronous data-parallel training across a fixed WAN topology. It uses virtual
+time and closed-form compute/collective costs, without running tensor
+operations. Its API accepts a per-node local-sample allocation and commits a
+global batch only after compute and AllReduce succeed. See
+[`wan_sim/README.md`](wan_sim/README.md) for its current boundaries and example
+topology. The existing single delayed-shard simulator remains in use for the
+current WAIT/DUPLICATE experiments.
+
 ## Step 1: single-process MLP baseline
 
 The first step trains a small MLP to fit fixed random input and target vectors.
@@ -143,6 +152,10 @@ The run record is written to `RL_schedule/results/live-run.json`. Worker
 services `worker-4` through `worker-6` are available for scaling runs. RLOO
 checkpoints are tied to their worker count, so train a matching checkpoint for
 each fleet size before a live policy run:
+
+The worker-side mini-batch size can be set with `RL_BATCH_SIZE` (default 32).
+The WAN simulator models this cost abstractly through its workload profile and
+does not execute the live worker code.
 
 ```bash
 python -m RL_schedule.rl_policy train-rloo --worker-count 4 \

@@ -277,7 +277,7 @@ def _run_gradient_round(
             shard_id=shard_id,
             attempt_id=attempt_id,
         )
-        payload["batch_size"] = 32
+        payload["batch_size"] = config.batch_size
         payload["task_id"] = task_id
         attempt = LiveAttempt(
             shard_id=shard_id,
@@ -662,6 +662,7 @@ def train_live(
             "input_dim": config.input_dim,
             "hidden_dim": config.hidden_dim,
             "output_dim": config.output_dim,
+            "batch_size": config.batch_size,
             "dataset_seed": config.seed,
             "model_seed": config.seed + 1,
             "learning_rate": config.learning_rate,
@@ -690,6 +691,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     parser.add_argument("--input-dim", type=int, default=32)
     parser.add_argument("--output-dim", type=int, default=16)
     parser.add_argument("--hidden-dim", type=int, default=256)
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=32,
+        help="number of samples per worker mini-batch within each shard",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--steps", type=int, default=100)
     parser.add_argument("--shards", type=int)
@@ -710,6 +717,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         hidden_dim=args.hidden_dim,
         seed=args.seed,
         epochs=args.steps,
+        batch_size=args.batch_size,
         learning_rate=args.learning_rate,
         target_loss=args.target_loss,
     )

@@ -73,6 +73,8 @@ services:
       - "${RL_STEPS:-100}"
       - "--hidden-dim"
       - "256"
+      - "--batch-size"
+      - "${RL_BATCH_SIZE:-32}"
       - "--json"
       - "/results/live-run.json"
     volumes:
