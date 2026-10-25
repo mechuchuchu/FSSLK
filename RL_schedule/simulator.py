@@ -62,8 +62,11 @@ class SimulationConfig:
     network_cost_weight: float = 0.02
     duplicate_compute_cost_weight: float = 0.1
     failure_penalty: float = 120.0
+    reward_mode: str = "cost_sensitive"
 
     def validate(self) -> None:
+        if self.reward_mode not in {"cost_sensitive", "time_success"}:
+            raise ValueError("reward_mode must be cost_sensitive or time_success")
         if not math.isfinite(self.work_units) or self.work_units <= 0:
             raise ValueError("work_units must be positive")
         if self.input_bytes < 0 or self.result_bytes < 0:
@@ -306,11 +309,16 @@ class SchedulingEnv:
         delta_time = self.now - old_time
         delta_network = self.network_work_seconds - old_network_cost
         delta_duplicate_compute = self.duplicate_compute_seconds - old_duplicate_compute
-        reward = -delta_time
-        reward -= self.config.network_cost_weight * delta_network
-        reward -= self.config.duplicate_compute_cost_weight * delta_duplicate_compute
-        if self.done and not self.success:
-            reward -= self.config.failure_penalty
+        if self.config.reward_mode == "time_success":
+            reward = -delta_time
+            if self.done and self.success:
+                reward += 1.0
+        else:
+            reward = -delta_time
+            reward -= self.config.network_cost_weight * delta_network
+            reward -= self.config.duplicate_compute_cost_weight * delta_duplicate_compute
+            if self.done and not self.success:
+                reward -= self.config.failure_penalty
 
         self._history.append(self._raw_observation())
         info: dict[str, float | int | str | None | bool] = {

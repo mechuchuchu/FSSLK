@@ -1,0 +1,61 @@
+/usr/local/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+{
+  "scheduler": "fixed",
+  "run_id": "b956716c518a43eb9fd05f650688bc5e",
+  "policy_checkpoint": null,
+  "config": {
+    "samples": 16384,
+    "input_dim": 32,
+    "hidden_dim": 4096,
+    "output_dim": 16,
+    "dataset_seed": 0,
+    "model_seed": 1,
+    "learning_rate": 0.003,
+    "target_loss": 0.01
+  },
+  "workers": [
+    "http://worker-fast:27500",
+    "http://worker-medium:27500",
+    "http://worker-slow:27500",
+    "http://worker-4:27500"
+  ],
+  "shard_count": 4,
+  "steps_completed": 1,
+  "final_train_loss": 7.395050525665283,
+  "target_reached": false,
+  "target_loss_step": null,
+  "elapsed_seconds": 10.504937462999806,
+  "final_model_sha256": "6284879a3fbbd9fdb9fc1ae65905215264df282eedbeb19299fd0c116870c879",
+  "step_metrics": [
+    {
+      "model_version": 0,
+      "makespan_seconds": 8.000281754999378,
+      "gradient_aggregation_seconds": 0.005037120999986655,
+      "shard_count": 4,
+      "shard_sizes": [
+        4096,
+        4096,
+        4096,
+        4096
+      ],
+      "attempts": 4,
+      "duplicates_started": 0,
+      "wait_actions": 1,
+      "duplicate_actions": 0,
+      "late_results_ignored": 0,
+      "pending_worker_cancellations": 0,
+      "invalid_results_rejected": 0,
+      "invalid_responses": 0,
+      "stale_results_rejected": 0,
+      "duplicate_results_ignored": 0,
+      "weighted_pre_update_loss": 1.0561433341354132,
+      "reference_gradient_max_abs_error": 1.1175870895385742e-08,
+      "reference_gradient_l2_error": 2.5555131106107025e-07,
+      "reference_loss_difference": 5.029141902923584e-08,
+      "remote_pre_update_loss": 1.0561433341354132,
+      "local_loss_after_update": 7.395050525665283,
+      "step": 1
+    }
+  ]
+}

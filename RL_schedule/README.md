@@ -94,8 +94,9 @@ python -m RL_schedule.rl_policy compare \
 
 The policy observes only simulator telemetry. It chooses between short,
 medium, or long waits and duplicating the current shard on an available worker.
-The reward charges elapsed time, network work, duplicate compute, and failed
-episodes, while evaluation reports makespan and resource costs separately.
+The default `cost_sensitive` reward charges elapsed time, network work,
+duplicate compute, and failed episodes, while evaluation reports makespan and
+resource costs separately.
 `--worker-count` selects the fleet size for training and evaluation; each
 checkpoint is tied to that count because its observation and action dimensions
 depend on the worker list. The current simulator scales the scheduling choices
@@ -109,16 +110,23 @@ decisions within an episode. It samples groups of trajectories under the same
 worker condition and uses each trajectory's return minus the other group
 members' mean return as its RLOO advantage. It performs one on-policy update
 per group and does not train a value critic.
+To train RLOO with only elapsed time and binary success in the reward, pass
+`--reward-mode time_success`. Each step receives `-elapsed_seconds`, with `+1`
+added on successful episode completion; there is no separate network, duplicate
+compute, or failure penalty in this mode.
 For counts above three, extra simulator profiles are seeded variations of the
-fast, medium, and slow templates; they do not represent additional measured
-Docker workers.
+fast, medium, and slow templates. These vary the simulator's training
+conditions; the live Compose fleet separately defines and measures workers
+4–6 using the fixed `seen` profiles.
 `--resume-checkpoint` continues from a compatible policy. Checkpoints that do
 not contain optimizer state resume with a freshly initialized Adam optimizer.
 
 ## Step 5: schedule real worker tasks
 
-The Docker Compose setup starts three isolated CPU workers with different
-network profiles. The coordinator sends each worker its fixed data shard and
+The Docker Compose setup defines six isolated CPU workers with different
+network profiles; the default coordinator run still starts the original three.
+For scaling runs, the coordinator uses a fixed `seen` profile list matching
+the endpoint count. It sends each worker its fixed data shard and
 the same model version. It polls task progress and heartbeat age, then uses
 the selected live scheduler to wait or duplicate a pending shard on an
 available worker. The first accepted result for each shard version is weighted
@@ -131,8 +139,26 @@ docker compose -f RL_schedule/compose.yaml up --build \
   --abort-on-container-exit --exit-code-from coordinator
 ```
 
-The run record is written to `RL_schedule/results/live-run.json`. Set
-`RL_STEPS=20` to shorten a run. The default `adaptive` scheduler uses the
+The run record is written to `RL_schedule/results/live-run.json`. Worker
+services `worker-4` through `worker-6` are available for scaling runs. RLOO
+checkpoints are tied to their worker count, so train a matching checkpoint for
+each fleet size before a live policy run:
+
+```bash
+python -m RL_schedule.rl_policy train-rloo --worker-count 4 \
+  --output RL_schedule/results/rloo-lstm-4w.pt
+python -m RL_schedule.rl_policy train-rloo --worker-count 6 \
+  --output RL_schedule/results/rloo-lstm-6w.pt
+```
+
+`RL_schedule.live_compare` runs paired repeated live trials for an existing
+cost-sensitive RLOO checkpoint, a time-success RLOO checkpoint, adaptive, and
+fixed policies. It shuffles policy order per repetition and writes running
+means, confidence intervals, paired differences, and each individual trial.
+Run it inside the Compose network with `docker compose run --entrypoint python`
+after starting the requested worker services.
+
+Set `RL_STEPS=20` to shorten a run. The default `adaptive` scheduler uses the
 heuristic policy; `RL_SCHEDULER=fixed` selects the fixed-timeout baseline.
 Train a history-aware PPO checkpoint locally, then use it with the same
 Compose workers:

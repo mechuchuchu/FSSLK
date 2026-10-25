@@ -1,0 +1,228 @@
+/usr/local/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+rep=1/30 order=1/4 method=fixed makespan=8.006s attempts=4
+rep=1/30 order=2/4 method=rloo_cost_sensitive makespan=6.818s attempts=6
+rep=1/30 order=3/4 method=adaptive makespan=6.988s attempts=5
+rep=1/30 order=4/4 method=rloo_time_success makespan=6.841s attempts=6
+rep=2/30 order=1/4 method=fixed makespan=7.949s attempts=4
+rep=2/30 order=2/4 method=rloo_time_success makespan=6.664s attempts=6
+rep=2/30 order=3/4 method=rloo_cost_sensitive makespan=6.617s attempts=6
+rep=2/30 order=4/4 method=adaptive makespan=6.803s attempts=5
+rep=3/30 order=1/4 method=rloo_cost_sensitive makespan=6.097s attempts=5
+rep=3/30 order=2/4 method=adaptive makespan=6.086s attempts=5
+rep=3/30 order=3/4 method=rloo_time_success makespan=6.618s attempts=6
+rep=3/30 order=4/4 method=fixed makespan=7.915s attempts=4
+rep=4/30 order=1/4 method=adaptive makespan=6.833s attempts=5
+rep=4/30 order=2/4 method=fixed makespan=7.954s attempts=4
+rep=4/30 order=3/4 method=rloo_cost_sensitive makespan=6.759s attempts=6
+rep=4/30 order=4/4 method=rloo_time_success makespan=6.614s attempts=6
+rep=5/30 order=1/4 method=fixed makespan=7.934s attempts=4
+rep=5/30 order=2/4 method=adaptive makespan=6.044s attempts=5
+rep=5/30 order=3/4 method=rloo_time_success makespan=6.534s attempts=6
+rep=5/30 order=4/4 method=rloo_cost_sensitive makespan=6.735s attempts=6
+rep=6/30 order=1/4 method=fixed makespan=7.925s attempts=4
+rep=6/30 order=2/4 method=rloo_time_success makespan=6.557s attempts=6
+rep=6/30 order=3/4 method=adaptive makespan=7.127s attempts=5
+rep=6/30 order=4/4 method=rloo_cost_sensitive makespan=6.081s attempts=5
+rep=7/30 order=1/4 method=rloo_time_success makespan=6.785s attempts=6
+rep=7/30 order=2/4 method=rloo_cost_sensitive makespan=6.783s attempts=6
+rep=7/30 order=3/4 method=fixed makespan=7.931s attempts=4
+rep=7/30 order=4/4 method=adaptive makespan=7.202s attempts=5
+rep=8/30 order=1/4 method=adaptive makespan=7.021s attempts=5
+rep=8/30 order=2/4 method=fixed makespan=7.876s attempts=4
+rep=8/30 order=3/4 method=rloo_time_success makespan=6.532s attempts=6
+rep=8/30 order=4/4 method=rloo_cost_sensitive makespan=6.819s attempts=6
+rep=9/30 order=1/4 method=rloo_time_success makespan=6.703s attempts=6
+rep=9/30 order=2/4 method=adaptive makespan=6.932s attempts=5
+rep=9/30 order=3/4 method=fixed makespan=7.925s attempts=4
+rep=9/30 order=4/4 method=rloo_cost_sensitive makespan=6.732s attempts=6
+rep=10/30 order=1/4 method=rloo_time_success makespan=6.812s attempts=6
+rep=10/30 order=2/4 method=rloo_cost_sensitive makespan=6.831s attempts=6
+rep=10/30 order=3/4 method=adaptive makespan=7.055s attempts=5
+rep=10/30 order=4/4 method=fixed makespan=7.856s attempts=4
+rep=11/30 order=1/4 method=rloo_time_success makespan=6.118s attempts=5
+rep=11/30 order=2/4 method=rloo_cost_sensitive makespan=6.831s attempts=6
+rep=11/30 order=3/4 method=adaptive makespan=7.025s attempts=5
+rep=11/30 order=4/4 method=fixed makespan=7.990s attempts=4
+rep=12/30 order=1/4 method=rloo_cost_sensitive makespan=6.706s attempts=6
+rep=12/30 order=2/4 method=adaptive makespan=7.039s attempts=5
+rep=12/30 order=3/4 method=fixed makespan=7.868s attempts=4
+rep=12/30 order=4/4 method=rloo_time_success makespan=6.714s attempts=6
+rep=13/30 order=1/4 method=adaptive makespan=6.982s attempts=5
+rep=13/30 order=2/4 method=rloo_cost_sensitive makespan=6.816s attempts=6
+rep=13/30 order=3/4 method=fixed makespan=7.935s attempts=4
+rep=13/30 order=4/4 method=rloo_time_success makespan=6.818s attempts=6
+rep=14/30 order=1/4 method=rloo_cost_sensitive makespan=6.722s attempts=6
+rep=14/30 order=2/4 method=adaptive makespan=7.010s attempts=5
+rep=14/30 order=3/4 method=fixed makespan=7.932s attempts=4
+rep=14/30 order=4/4 method=rloo_time_success makespan=6.629s attempts=6
+rep=15/30 order=1/4 method=adaptive makespan=7.103s attempts=5
+rep=15/30 order=2/4 method=fixed makespan=7.945s attempts=4
+rep=15/30 order=3/4 method=rloo_time_success makespan=6.743s attempts=6
+rep=15/30 order=4/4 method=rloo_cost_sensitive makespan=6.727s attempts=6
+rep=16/30 order=1/4 method=rloo_cost_sensitive makespan=6.920s attempts=6
+rep=16/30 order=2/4 method=fixed makespan=7.895s attempts=4
+rep=16/30 order=3/4 method=adaptive makespan=6.791s attempts=5
+rep=16/30 order=4/4 method=rloo_time_success makespan=6.632s attempts=6
+rep=17/30 order=1/4 method=fixed makespan=7.869s attempts=4
+rep=17/30 order=2/4 method=rloo_time_success makespan=6.679s attempts=6
+rep=17/30 order=3/4 method=adaptive makespan=7.048s attempts=5
+rep=17/30 order=4/4 method=rloo_cost_sensitive makespan=6.737s attempts=6
+rep=18/30 order=1/4 method=rloo_time_success makespan=6.683s attempts=6
+rep=18/30 order=2/4 method=rloo_cost_sensitive makespan=6.825s attempts=6
+rep=18/30 order=3/4 method=adaptive makespan=6.131s attempts=5
+rep=18/30 order=4/4 method=fixed makespan=7.813s attempts=4
+rep=19/30 order=1/4 method=rloo_cost_sensitive makespan=6.912s attempts=6
+rep=19/30 order=2/4 method=fixed makespan=7.914s attempts=4
+rep=19/30 order=3/4 method=rloo_time_success makespan=6.769s attempts=6
+rep=19/30 order=4/4 method=adaptive makespan=7.148s attempts=5
+rep=20/30 order=1/4 method=rloo_time_success makespan=6.718s attempts=6
+rep=20/30 order=2/4 method=rloo_cost_sensitive makespan=6.791s attempts=6
+rep=20/30 order=3/4 method=adaptive makespan=7.132s attempts=5
+rep=20/30 order=4/4 method=fixed makespan=7.937s attempts=4
+rep=21/30 order=1/4 method=adaptive makespan=5.973s attempts=5
+rep=21/30 order=2/4 method=rloo_time_success makespan=6.731s attempts=6
+rep=21/30 order=3/4 method=rloo_cost_sensitive makespan=6.762s attempts=6
+rep=21/30 order=4/4 method=fixed makespan=7.777s attempts=4
+rep=22/30 order=1/4 method=rloo_time_success makespan=6.706s attempts=6
+rep=22/30 order=2/4 method=rloo_cost_sensitive makespan=6.720s attempts=6
+rep=22/30 order=3/4 method=adaptive makespan=6.993s attempts=5
+rep=22/30 order=4/4 method=fixed makespan=7.964s attempts=4
+rep=23/30 order=1/4 method=rloo_cost_sensitive makespan=6.677s attempts=6
+rep=23/30 order=2/4 method=rloo_time_success makespan=6.822s attempts=6
+rep=23/30 order=3/4 method=fixed makespan=7.942s attempts=4
+rep=23/30 order=4/4 method=adaptive makespan=7.197s attempts=5
+rep=24/30 order=1/4 method=adaptive makespan=7.024s attempts=5
+rep=24/30 order=2/4 method=fixed makespan=7.954s attempts=4
+rep=24/30 order=3/4 method=rloo_time_success makespan=6.689s attempts=6
+rep=24/30 order=4/4 method=rloo_cost_sensitive makespan=6.735s attempts=6
+rep=25/30 order=1/4 method=rloo_cost_sensitive makespan=6.708s attempts=6
+rep=25/30 order=2/4 method=fixed makespan=7.875s attempts=4
+rep=25/30 order=3/4 method=adaptive makespan=7.020s attempts=5
+rep=25/30 order=4/4 method=rloo_time_success makespan=6.813s attempts=6
+rep=26/30 order=1/4 method=fixed makespan=7.965s attempts=4
+rep=26/30 order=2/4 method=rloo_cost_sensitive makespan=6.810s attempts=6
+rep=26/30 order=3/4 method=rloo_time_success makespan=6.795s attempts=6
+rep=26/30 order=4/4 method=adaptive makespan=7.126s attempts=5
+rep=27/30 order=1/4 method=adaptive makespan=7.087s attempts=5
+rep=27/30 order=2/4 method=rloo_time_success makespan=6.112s attempts=5
+rep=27/30 order=3/4 method=rloo_cost_sensitive makespan=6.756s attempts=6
+rep=27/30 order=4/4 method=fixed makespan=7.999s attempts=4
+rep=28/30 order=1/4 method=rloo_time_success makespan=6.766s attempts=6
+rep=28/30 order=2/4 method=rloo_cost_sensitive makespan=6.632s attempts=6
+rep=28/30 order=3/4 method=adaptive makespan=6.995s attempts=5
+rep=28/30 order=4/4 method=fixed makespan=7.918s attempts=4
+rep=29/30 order=1/4 method=fixed makespan=7.898s attempts=4
+rep=29/30 order=2/4 method=rloo_cost_sensitive makespan=6.698s attempts=6
+rep=29/30 order=3/4 method=adaptive makespan=7.096s attempts=5
+rep=29/30 order=4/4 method=rloo_time_success makespan=6.355s attempts=6
+rep=30/30 order=1/4 method=rloo_time_success makespan=6.803s attempts=6
+rep=30/30 order=2/4 method=adaptive makespan=7.115s attempts=5
+rep=30/30 order=3/4 method=fixed makespan=7.995s attempts=4
+rep=30/30 order=4/4 method=rloo_cost_sensitive makespan=6.673s attempts=6
+{
+  "methods": {
+    "adaptive": {
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "makespan_seconds": {
+        "runs": 30,
+        "mean": 6.904238033467057,
+        "sample_stddev": 0.3523143531722537,
+        "ci95_low": 6.778163961337738,
+        "ci95_high": 7.030312105596376,
+        "median": 7.022752202501579,
+        "p95": 7.197237656000652
+      },
+      "mean_attempts": 5.0,
+      "mean_duplicates_started": 1.0,
+      "max_gradient_error": 1.1175870895385742e-08
+    },
+    "fixed": {
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "makespan_seconds": {
+        "runs": 30,
+        "mean": 7.921822259566822,
+        "sample_stddev": 0.052386376533010336,
+        "ci95_low": 7.90307603547987,
+        "ci95_high": 7.940568483653774,
+        "median": 7.931651277001038,
+        "p95": 7.998969748998206
+      },
+      "mean_attempts": 4.0,
+      "mean_duplicates_started": 0.0,
+      "max_gradient_error": 1.1175870895385742e-08
+    },
+    "rloo_cost_sensitive": {
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "makespan_seconds": {
+        "runs": 30,
+        "mean": 6.71443019813305,
+        "sample_stddev": 0.18412724493353666,
+        "ci95_low": 6.648541109738817,
+        "ci95_high": 6.780319286527282,
+        "median": 6.736381333999816,
+        "p95": 6.912293336001312
+      },
+      "mean_attempts": 5.933333333333334,
+      "mean_duplicates_started": 1.9333333333333333,
+      "max_gradient_error": 1.1175870895385742e-08
+    },
+    "rloo_time_success": {
+      "successful_runs": 30,
+      "failed_runs": 0,
+      "makespan_seconds": {
+        "runs": 30,
+        "mean": 6.658452444232959,
+        "sample_stddev": 0.18255078178798564,
+        "ci95_low": 6.59312748593031,
+        "ci95_high": 6.7237774025356085,
+        "median": 6.70425257649913,
+        "p95": 6.8219297579998965
+      },
+      "mean_attempts": 5.933333333333334,
+      "mean_duplicates_started": 1.9333333333333333,
+      "max_gradient_error": 1.1175870895385742e-08
+    }
+  },
+  "paired_makespan_differences": {
+    "rloo_time_success_minus_rloo_cost_sensitive_seconds": {
+      "runs": 30,
+      "mean": -0.05597775390009095,
+      "sample_stddev": 0.2494081816585792,
+      "ci95_low": -0.14522732548564765,
+      "ci95_high": 0.03327181768546575,
+      "median": -0.023868377999860968,
+      "p95": 0.47677546100021573
+    },
+    "rloo_time_success_minus_adaptive_seconds": {
+      "runs": 30,
+      "mean": -0.24578558923409824,
+      "sample_stddev": 0.38829438212588185,
+      "ci95_low": -0.3847349493687774,
+      "ci95_high": -0.10683622909941906,
+      "median": -0.3185449130014604,
+      "p95": 0.5518770729977405
+    },
+    "rloo_cost_sensitive_minus_adaptive_seconds": {
+      "runs": 30,
+      "mean": -0.1898078353340073,
+      "sample_stddev": 0.3655943455409209,
+      "ci95_low": -0.3206340917007531,
+      "ci95_high": -0.058981578967261555,
+      "median": -0.28023885199945653,
+      "p95": 0.6938453749971814
+    },
+    "rloo_time_success_minus_fixed_seconds": {
+      "runs": 30,
+      "mean": -1.2633698153338628,
+      "sample_stddev": 0.20049796670815462,
+      "ci95_low": -1.3351170912791805,
+      "ci95_high": -1.1916225393885451,
+      "median": -1.2105372095011262,
+      "p95": -1.0459266559992102
+    }
+  }
+}

@@ -1,0 +1,65 @@
+/usr/local/lib/python3.12/site-packages/torch/_subclasses/functional_tensor.py:368: UserWarning: Failed to initialize NumPy: No module named 'numpy' (Triggered internally at /__w/pytorch/pytorch/torch/csrc/utils/tensor_numpy.cpp:84.)
+  cpu = _conversion_method_template(device=torch.device("cpu"))
+{
+  "scheduler": "fixed",
+  "run_id": "44b9c905b9634009be06119c5efaea81",
+  "policy_checkpoint": null,
+  "config": {
+    "samples": 16384,
+    "input_dim": 32,
+    "hidden_dim": 4096,
+    "output_dim": 16,
+    "dataset_seed": 0,
+    "model_seed": 1,
+    "learning_rate": 0.003,
+    "target_loss": 0.01
+  },
+  "workers": [
+    "http://worker-fast:27500",
+    "http://worker-medium:27500",
+    "http://worker-slow:27500",
+    "http://worker-4:27500",
+    "http://worker-5:27500",
+    "http://worker-6:27500"
+  ],
+  "shard_count": 6,
+  "steps_completed": 1,
+  "final_train_loss": 7.395050525665283,
+  "target_reached": false,
+  "target_loss_step": null,
+  "elapsed_seconds": 13.080942820000928,
+  "final_model_sha256": "4ee435e10d621497155f918f38d990ada45c8f55d16e69bdd64dfdbf999eba76",
+  "step_metrics": [
+    {
+      "model_version": 0,
+      "makespan_seconds": 10.45100761499998,
+      "gradient_aggregation_seconds": 0.0046156949993019225,
+      "shard_count": 6,
+      "shard_sizes": [
+        2731,
+        2731,
+        2731,
+        2731,
+        2730,
+        2730
+      ],
+      "attempts": 6,
+      "duplicates_started": 0,
+      "wait_actions": 1,
+      "duplicate_actions": 0,
+      "late_results_ignored": 0,
+      "pending_worker_cancellations": 0,
+      "invalid_results_rejected": 0,
+      "invalid_responses": 0,
+      "stale_results_rejected": 0,
+      "duplicate_results_ignored": 0,
+      "weighted_pre_update_loss": 1.0561433347211278,
+      "reference_gradient_max_abs_error": 9.313225746154785e-09,
+      "reference_gradient_l2_error": 2.461594686842084e-07,
+      "reference_loss_difference": 5.0877133617177606e-08,
+      "remote_pre_update_loss": 1.0561433347211278,
+      "local_loss_after_update": 7.395050525665283,
+      "step": 1
+    }
+  ]
+}

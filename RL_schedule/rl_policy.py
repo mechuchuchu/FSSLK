@@ -75,6 +75,7 @@ class RLOOConfig:
     seed: int = 0
     learning_rate: float = 0.0003
     entropy_weight: float = 0.01
+    reward_mode: str = "cost_sensitive"
 
     def validate(self) -> None:
         if self.episodes < self.group_size or self.group_size < 2:
@@ -87,6 +88,8 @@ class RLOOConfig:
             raise ValueError("learning_rate must be positive and finite")
         if self.entropy_weight < 0 or not math.isfinite(self.entropy_weight):
             raise ValueError("entropy_weight must be finite and non-negative")
+        if self.reward_mode not in {"cost_sensitive", "time_success"}:
+            raise ValueError("reward_mode must be cost_sensitive or time_success")
 
 
 class PolicyValueNetwork(nn.Module):
@@ -310,8 +313,13 @@ def _collect_rloo_episode(
     workers: Sequence[WorkerSpec],
     history_length: int,
     seed: int,
+    simulation_config: SimulationConfig,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    env = SchedulingEnv(workers=workers, history_length=history_length)
+    env = SchedulingEnv(
+        workers=workers,
+        config=simulation_config,
+        history_length=history_length,
+    )
     observation, mask = env.reset(seed)
     trajectory = {"frames": [], "masks": [], "actions": []}
     rewards: list[float] = []
@@ -454,6 +462,7 @@ def train_policy(
     torch.manual_seed(config.seed)
     prototype_env = SchedulingEnv(
         workers=evaluation_workers("seen", config.worker_count),
+        config=SimulationConfig(reward_mode=config.reward_mode),
         history_length=config.history_length,
     )
     policy = _make_policy_network(
@@ -532,6 +541,7 @@ def train_policy(
                 workers,
                 config.history_length,
                 seed=config.seed + 100_003 + episode,
+                simulation_config=SimulationConfig(reward_mode=config.reward_mode),
                 config=config,
             )
             batch_trajectories.extend(trajectory)
@@ -597,6 +607,7 @@ def train_rloo_policy(config: RLOOConfig, output: Path) -> dict[str, Any]:
     torch.manual_seed(config.seed)
     prototype_env = SchedulingEnv(
         workers=evaluation_workers("seen", config.worker_count),
+        config=SimulationConfig(reward_mode=config.reward_mode),
         history_length=config.history_length,
     )
     policy = StatefulLSTMPolicyNetwork(
@@ -622,6 +633,9 @@ def train_rloo_policy(config: RLOOConfig, output: Path) -> dict[str, Any]:
                 workers,
                 config.history_length,
                 seed=config.seed + 100_003 + episode,
+                simulation_config=SimulationConfig(
+                    reward_mode=config.reward_mode
+                ),
             )
             trajectories.append(trajectory)
             group_metrics.append(metrics)
@@ -844,6 +858,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     rloo_parser.add_argument("--seed", type=int, default=0)
     rloo_parser.add_argument("--learning-rate", type=float, default=0.0003)
     rloo_parser.add_argument("--entropy-weight", type=float, default=0.01)
+    rloo_parser.add_argument(
+        "--reward-mode",
+        choices=("cost_sensitive", "time_success"),
+        default="cost_sensitive",
+    )
     rloo_parser.add_argument("--output", type=Path, required=True)
     rloo_parser.add_argument("--metrics", type=Path)
     rloo_parser.add_argument("--eval-episodes", type=int, default=100)
@@ -893,6 +912,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             seed=args.seed,
             learning_rate=args.learning_rate,
             entropy_weight=args.entropy_weight,
+            reward_mode=args.reward_mode,
         )
         result = train_rloo_policy(config, args.output)
         if args.eval_episodes > 0:

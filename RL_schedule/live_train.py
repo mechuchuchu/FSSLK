@@ -22,7 +22,8 @@ from .distributed_train import _local_full_gradient, _request_payload, _wait_for
 from .live_scheduler import LiveAttempt, LiveObservationHistory, LivePolicy
 from .mlp_baseline import BaselineConfig, make_dataset, make_model
 from .result_registry import GradientResultRegistry
-from .simulator import SimulationConfig, default_workers
+from .scenarios import evaluation_workers
+from .simulator import SimulationConfig
 from .tensor_wire import decode_float32
 
 
@@ -592,9 +593,7 @@ def train_live(
     ):
         if not math.isfinite(value) or value <= 0:
             raise ValueError(f"{name} must be positive and finite")
-    profiles = default_workers()
-    if len(endpoints) != len(profiles):
-        raise ValueError("live RL policies currently require exactly three worker profiles")
+    profiles = evaluation_workers("seen", len(endpoints))
     sim_config = SimulationConfig()
     policy = LivePolicy(
         scheduler_name,
