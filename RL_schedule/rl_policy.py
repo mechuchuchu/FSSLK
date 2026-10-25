@@ -24,6 +24,7 @@ class PPOConfig:
     episodes: int = 1000
     rollout_episodes: int = 16
     worker_count: int = 3
+    architecture: str = "mlp"
     history_length: int = 4
     hidden_size: int = 128
     seed: int = 0
@@ -41,6 +42,8 @@ class PPOConfig:
             raise ValueError("episode counts and worker_count must be at least 1")
         if self.history_length < 1 or self.hidden_size < 1:
             raise ValueError("history length and hidden size must be at least 1")
+        if self.architecture not in {"mlp", "lstm"}:
+            raise ValueError("architecture must be 'mlp' or 'lstm'")
         if self.learning_rate <= 0:
             raise ValueError("learning_rate must be positive")
         if not math.isfinite(self.learning_rate):
@@ -67,6 +70,8 @@ class PolicyValueNetwork(nn.Module):
 
     def __init__(self, observation_size: int, action_count: int, hidden_size: int) -> None:
         super().__init__()
+        self.observation_size = observation_size
+        self.action_count = action_count
         self.trunk = nn.Sequential(
             nn.Linear(observation_size, hidden_size),
             nn.Tanh(),
@@ -83,6 +88,60 @@ class PolicyValueNetwork(nn.Module):
         logits = self.policy_head(hidden).masked_fill(~action_masks, -1e9)
         values = self.value_head(hidden).squeeze(-1)
         return logits, values
+
+
+class LSTMPolicyValueNetwork(nn.Module):
+    """Actor-critic that recurrently encodes the recent observation frames."""
+
+    def __init__(
+        self,
+        observation_size: int,
+        action_count: int,
+        hidden_size: int,
+        history_length: int,
+    ) -> None:
+        super().__init__()
+        if observation_size % history_length:
+            raise ValueError("observation size must be divisible by history length")
+        self.observation_size = observation_size
+        self.action_count = action_count
+        self.history_length = history_length
+        self.frame_size = observation_size // history_length
+        self.lstm = nn.LSTM(
+            input_size=self.frame_size,
+            hidden_size=hidden_size,
+            batch_first=True,
+        )
+        self.policy_head = nn.Linear(hidden_size, action_count)
+        self.value_head = nn.Linear(hidden_size, 1)
+
+    def forward(
+        self, observations: torch.Tensor, action_masks: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        sequence = observations.reshape(
+            observations.shape[0], self.history_length, self.frame_size
+        )
+        encoded, _ = self.lstm(sequence)
+        hidden = encoded[:, -1, :]
+        logits = self.policy_head(hidden).masked_fill(~action_masks, -1e9)
+        values = self.value_head(hidden).squeeze(-1)
+        return logits, values
+
+
+def _make_policy_network(
+    architecture: str,
+    observation_size: int,
+    action_count: int,
+    hidden_size: int,
+    history_length: int,
+) -> nn.Module:
+    if architecture == "mlp":
+        return PolicyValueNetwork(observation_size, action_count, hidden_size)
+    if architecture == "lstm":
+        return LSTMPolicyValueNetwork(
+            observation_size, action_count, hidden_size, history_length
+        )
+    raise ValueError(f"unknown policy architecture: {architecture}")
 
 
 def _gae(
@@ -108,7 +167,7 @@ def _gae(
 
 
 def _collect_episode(
-    policy: PolicyValueNetwork,
+    policy: nn.Module,
     workers: Sequence[WorkerSpec],
     history_length: int,
     seed: int,
@@ -159,7 +218,7 @@ def _collect_episode(
 
 
 def _update_policy(
-    policy: PolicyValueNetwork,
+    policy: nn.Module,
     optimizer: torch.optim.Optimizer,
     trajectory: list[dict[str, Any]],
     config: PPOConfig,
@@ -225,10 +284,12 @@ def train_policy(
         workers=evaluation_workers("seen", config.worker_count),
         history_length=config.history_length,
     )
-    policy = PolicyValueNetwork(
+    policy = _make_policy_network(
+        config.architecture,
         prototype_env.observation_size,
         prototype_env.action_count,
         config.hidden_size,
+        config.history_length,
     )
     starting_episode = 0
     resumed_checkpoint: dict[str, Any] | None = None
@@ -239,6 +300,7 @@ def train_policy(
         expected = {
             "history_length": config.history_length,
             "worker_count": config.worker_count,
+            "architecture": config.architecture,
             "hidden_size": config.hidden_size,
             "observation_size": prototype_env.observation_size,
             "action_count": prototype_env.action_count,
@@ -252,6 +314,7 @@ def train_policy(
                     - len(SimulationConfig().wait_seconds),
                 )
             ),
+            "architecture": str(resumed_checkpoint.get("architecture", "mlp")),
             "hidden_size": int(resumed_checkpoint["hidden_size"]),
             "observation_size": int(resumed_checkpoint["observation_size"]),
             "action_count": int(resumed_checkpoint["action_count"]),
@@ -329,6 +392,7 @@ def train_policy(
             "format": "rl-schedule-ppo-v1",
             "history_length": config.history_length,
             "worker_count": config.worker_count,
+            "architecture": config.architecture,
             "hidden_size": config.hidden_size,
             "observation_size": prototype_env.observation_size,
             "action_count": prototype_env.action_count,
@@ -344,6 +408,8 @@ def train_policy(
         "checkpoint": str(output),
         "algorithm": "PPO",
         "policy_type": "instantaneous" if config.history_length == 1 else "history_aware",
+        "architecture": config.architecture,
+        "parameter_count": sum(parameter.numel() for parameter in policy.parameters()),
         "training_config": asdict(config),
         "starting_episodes": starting_episode,
         "episodes_trained": config.episodes,
@@ -354,12 +420,15 @@ def train_policy(
     }
 
 
-def _load_policy(checkpoint_path: Path) -> tuple[PolicyValueNetwork, int, int]:
+def _load_policy(checkpoint_path: Path) -> tuple[nn.Module, int, int]:
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    policy = PolicyValueNetwork(
+    history_length = int(checkpoint["history_length"])
+    policy = _make_policy_network(
+        str(checkpoint.get("architecture", "mlp")),
         int(checkpoint["observation_size"]),
         int(checkpoint["action_count"]),
         int(checkpoint["hidden_size"]),
+        history_length,
     )
     policy.load_state_dict(checkpoint["state_dict"])
     policy.eval()
@@ -370,11 +439,11 @@ def _load_policy(checkpoint_path: Path) -> tuple[PolicyValueNetwork, int, int]:
             - len(SimulationConfig().wait_seconds),
         )
     )
-    return policy, int(checkpoint["history_length"]), worker_count
+    return policy, history_length, worker_count
 
 
 def _run_policy_episode(
-    policy: PolicyValueNetwork,
+    policy: nn.Module,
     history_length: int,
     workers: Sequence[WorkerSpec],
     seed: int,
