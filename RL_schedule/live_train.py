@@ -196,8 +196,8 @@ def _cancel_and_cleanup(
     attempts: Sequence[LiveAttempt],
     timeout: float,
     grace_seconds: float = 5.0,
-) -> tuple[int, int]:
-    late_results = 0
+) -> tuple[set[str], int]:
+    late_result_ids: set[str] = set()
     pending = [attempt for attempt in attempts if attempt.active]
     for attempt in pending:
         _cancel(endpoints[attempt.worker_index], attempt.task_id, timeout)
@@ -207,7 +207,7 @@ def _cancel_and_cleanup(
         newly_terminal = [attempt for attempt in pending if not attempt.active]
         for attempt in newly_terminal:
             if attempt.status == "completed":
-                late_results += 1
+                late_result_ids.add(attempt.task_id)
             _forget(endpoints[attempt.worker_index], attempt.task_id, timeout)
         pending = [attempt for attempt in pending if attempt.active]
         if pending:
@@ -215,7 +215,7 @@ def _cancel_and_cleanup(
     for attempt in attempts:
         if not attempt.active:
             _forget(endpoints[attempt.worker_index], attempt.task_id, timeout)
-    return late_results, len(pending)
+    return late_result_ids, len(pending)
 
 
 def _run_gradient_round(
@@ -289,11 +289,18 @@ def _run_gradient_round(
         _submit(endpoints[worker_index], payload, timeout)
 
     try:
-        for shard_id in range(shard_count):
-            dispatch(shard_id, shard_id)
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=shard_count
+        ) as pool:
+            initial_submissions = [
+                pool.submit(dispatch, shard_id, shard_id)
+                for shard_id in range(shard_count)
+            ]
+            for future in initial_submissions:
+                future.result()
 
         invalid_responses = 0
-        late_results_ignored = 0
+        ignored_result_ids: set[str] = set()
         action_counts = {"wait": 0, "duplicate": 0}
         while not registry.complete():
             now = time.monotonic() - round_started
@@ -317,7 +324,7 @@ def _run_gradient_round(
                         continue
                     processed_task_ids.add(attempt.task_id)
                     if shard_id in registry.results:
-                        late_results_ignored += 1
+                        ignored_result_ids.add(attempt.task_id)
                         registry.duplicate_results_ignored += 1
                         _forget(endpoints[attempt.worker_index], attempt.task_id, timeout)
                         continue
@@ -490,7 +497,7 @@ def _run_gradient_round(
         _cancel_and_cleanup(endpoints, active_round_attempts, timeout)
         raise
 
-    cleanup_late_results, pending_cleanup = _cancel_and_cleanup(
+    cleanup_late_result_ids, pending_cleanup = _cancel_and_cleanup(
         endpoints,
         [
             attempt
@@ -499,7 +506,8 @@ def _run_gradient_round(
         ],
         timeout,
     )
-    late_results_ignored += cleanup_late_results
+    newly_ignored_ids = cleanup_late_result_ids - ignored_result_ids
+    ignored_result_ids.update(cleanup_late_result_ids)
     for shard_id, shard_attempts in attempts_by_shard.items():
         if shard_id not in registry.results:
             continue
@@ -509,8 +517,10 @@ def _run_gradient_round(
                 and attempt.task_id not in accepted_task_ids
                 and attempt.task_id not in processed_task_ids
             ):
-                late_results_ignored += 1
-                registry.duplicate_results_ignored += 1
+                newly_ignored_ids.add(attempt.task_id)
+                ignored_result_ids.add(attempt.task_id)
+    registry.duplicate_results_ignored += len(newly_ignored_ids)
+    late_results_ignored = len(ignored_result_ids)
     if pending_cleanup:
         raise RuntimeError(
             f"could not confirm cancellation of {pending_cleanup} worker task(s)"
